@@ -15,6 +15,8 @@ import uuid
 import json
 import sys
 
+from config import HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT
+
 WORKER_UUID = str(uuid.uuid4())
 
 
@@ -40,60 +42,54 @@ def receive(sock):
         return None
 
 
-# ── Conecta no Master e se registra ─────────────────────────
-def connect(host, port, temporary=False):
+# ── Conecta no Master ───────────────────────────────────────
+def connect(host, port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(HEARTBEAT_TIMEOUT)
     sock.connect((host, port))
-    task_type = "register_temporary_worker" if temporary else "register_worker"
-    send(sock, {"TASK": task_type, "WORKER_UUID": WORKER_UUID})
-    print(f"[WORKER] Conectado em {host}:{port} ({'temporário' if temporary else 'próprio'})")
+    print(f"[WORKER] Conectado em {host}:{port}")
     return sock
 
 
-# ── Loop principal: só fica recebendo mensagens do Master ────
+def connect_with_retry(host, port, retry_seconds=5):
+    while True:
+        try:
+            return connect(host, port)
+        except OSError:
+            print("[WORKER] Status: OFFLINE - Tentando Reconectar")
+            time.sleep(retry_seconds)
+
+
+# ── Loop principal: heartbeat periódico com reconexão ────────
 def run(host, port):
     original_host = host
     original_port = port
-    sock = connect(host, port)
+    master_server_uuid = "UNKNOWN_MASTER"
+    sock = connect_with_retry(host, port)
 
     while True:
-        msg = receive(sock)
+        try:
+            heartbeat = {"SERVER_UUID": master_server_uuid, "TASK": "HEARTBEAT"}
+            send(sock, heartbeat)
 
-        if msg is None:
-            print("[WORKER] Master desconectou. Tentando reconectar em 5s...")
-            time.sleep(5)
-            sock = connect(original_host, original_port)
-            continue
+            msg = receive(sock)
+            if msg and msg.get("TASK") == "HEARTBEAT" and msg.get("RESPONSE") == "ALIVE":
+                response_server_uuid = msg.get("SERVER_UUID")
+                if isinstance(response_server_uuid, str) and response_server_uuid.strip():
+                    master_server_uuid = response_server_uuid
+                print("[WORKER] Status: ALIVE")
+            else:
+                raise TimeoutError("Resposta inválida ou ausente do Master")
 
-        task = msg.get("TASK")
-        print(f"[WORKER] Recebeu: {msg}")
+            time.sleep(HEARTBEAT_INTERVAL)
 
-        # ── Executar uma tarefa ──────────────────────────────
-        if task == "assign_task":
-            task_id = msg.get("TASK_ID")
-            duration = msg.get("DURATION", 3)
-            print(f"[WORKER] Processando {task_id} por {duration}s...")
-            time.sleep(duration)
-            send(sock, {"TASK": "task_done", "WORKER_UUID": WORKER_UUID, "TASK_ID": task_id})
-            print(f"[WORKER] {task_id} concluída.")
-
-        # ── Ir para outro Master (temporariamente) ───────────
-        elif task == "command_redirect":
-            new_host = msg.get("NEW_MASTER_HOST")
-            new_port = msg.get("NEW_MASTER_PORT")
-            print(f"[WORKER] Redirecionando para {new_host}:{new_port}...")
-            sock.close()
-            sock = connect(new_host, new_port, temporary=True)
-
-        # ── Voltar ao Master original ────────────────────────
-        elif task == "command_release":
-            print(f"[WORKER] Liberado! Voltando ao Master original {original_host}:{original_port}...")
-            sock.close()
-            sock = connect(original_host, original_port)
-
-        # ── Heartbeat ────────────────────────────────────────
-        elif task == "HEARTBEAT":
-            send(sock, {"SERVER_UUID": WORKER_UUID, "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"})
+        except (socket.timeout, TimeoutError, OSError):
+            print("[WORKER] Status: OFFLINE - Tentando Reconectar")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            sock = connect_with_retry(original_host, original_port)
 
 
 # ── Entry point ──────────────────────────────────────────────

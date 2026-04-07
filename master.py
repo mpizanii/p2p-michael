@@ -12,7 +12,7 @@ import time
 import uuid
 import json
 
-from config import SERVER_UUID, MASTER_HOST, MASTER_PORT, LOAD_THRESHOLD, TASK_DURATION, REQUEST_INTERVAL, NEIGHBOR_MASTERS
+from config import SERVER_UUID, MASTER_HOST, MASTER_PORT, LOAD_THRESHOLD, TASK_DURATION, REQUEST_INTERVAL, NEIGHBOR_MASTERS, SPRINT1_HEARTBEAT_ONLY
 
 # ── Estado global ────────────────────────────────────────────
 workers = {}          # { worker_uuid: socket }
@@ -42,11 +42,24 @@ def receive(sock):
         return None
 
 
+def valid_heartbeat(msg):
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("TASK") != "HEARTBEAT":
+        return False
+    server_uuid = msg.get("SERVER_UUID")
+    if not isinstance(server_uuid, str) or not server_uuid.strip():
+        return False
+    return True
+
+
 # ── Trata mensagens vindas de um Worker conectado ────────────
-def handle_worker(worker_uuid, conn):
+def handle_worker(worker_uuid, conn, first_msg=None):
     global pending
+    msg = first_msg
     while True:
-        msg = receive(conn)
+        if msg is None:
+            msg = receive(conn)
         if msg is None:
             print(f"[MASTER] Worker {worker_uuid[:8]} desconectou.")
             workers.pop(worker_uuid, None)
@@ -54,6 +67,11 @@ def handle_worker(worker_uuid, conn):
             return
 
         if msg.get("TASK") == "HEARTBEAT":
+            if not valid_heartbeat(msg):
+                print("[MASTER] HEARTBEAT inválido: campos obrigatórios ausentes.")
+                workers.pop(worker_uuid, None)
+                conn.close()
+                return
             send(conn, {"SERVER_UUID": SERVER_UUID, "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"})
 
         elif msg.get("TASK") == "task_done":
@@ -67,6 +85,8 @@ def handle_worker(worker_uuid, conn):
             wid = msg.get("WORKER_UUID", worker_uuid)
             workers[wid] = conn
             print(f"[MASTER] Worker {'temporário ' if 'temporary' in msg.get('TASK','') else ''}{wid[:8]} registrado.")
+
+        msg = None
 
 
 # ── Aceita conexões de Workers ───────────────────────────────
@@ -85,21 +105,38 @@ def accept_loop():
             continue
 
         task = msg.get("TASK", "")
-        worker_uuid = msg.get("WORKER_UUID", str(uuid.uuid4()))
+        worker_uuid = msg.get("WORKER_UUID") or msg.get("SERVER_UUID") or str(uuid.uuid4())
+
+        # Heartbeat do Worker
+        if task == "HEARTBEAT":
+            if not valid_heartbeat(msg):
+                print(f"[MASTER] HEARTBEAT inválido de {addr}. Conexão encerrada.")
+                conn.close()
+                continue
+            print(f"[MASTER] Heartbeat recebido de {worker_uuid[:8]}.")
+            threading.Thread(target=handle_worker, args=(worker_uuid, conn, msg), daemon=True).start()
 
         # Worker se registrando
-        if "register" in task:
+        elif "register" in task:
             workers[worker_uuid] = conn
             kind = "temporário" if "temporary" in task else "próprio"
             print(f"[MASTER] Worker {kind} {worker_uuid[:8]} conectado de {addr}.")
-            threading.Thread(target=handle_worker, args=(worker_uuid, conn), daemon=True).start()
+            threading.Thread(target=handle_worker, args=(worker_uuid, conn, msg), daemon=True).start()
 
         # Master vizinho pedindo ajuda
         elif task == "request_help":
+            if SPRINT1_HEARTBEAT_ONLY:
+                print("[MASTER] Modo Sprint 1: ignorando request_help.")
+                conn.close()
+                continue
             handle_help_request(conn, msg)
 
         # Master vizinho liberando workers emprestados
         elif task == "command_release":
+            if SPRINT1_HEARTBEAT_ONLY:
+                print("[MASTER] Modo Sprint 1: ignorando command_release.")
+                conn.close()
+                continue
             print("[MASTER] Vizinho liberou os workers. Redirecionando de volta.")
             conn.close()
 
@@ -179,5 +216,9 @@ def handle_help_request(conn, msg):
 if __name__ == "__main__":
     print(f"[MASTER] Iniciando | UUID: {SERVER_UUID}")
     print(f"[MASTER] Suba workers com: python worker.py 127.0.0.1 {MASTER_PORT}")
-    threading.Thread(target=accept_loop, daemon=True).start()
-    load_generator()
+    if SPRINT1_HEARTBEAT_ONLY:
+        print("[MASTER] Modo Sprint 1 ativo: apenas HEARTBEAT para demonstracao.")
+        accept_loop()
+    else:
+        threading.Thread(target=accept_loop, daemon=True).start()
+        load_generator()
