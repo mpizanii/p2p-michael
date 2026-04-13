@@ -18,6 +18,8 @@ from config import SERVER_UUID, MASTER_HOST, MASTER_PORT, LOAD_THRESHOLD, TASK_D
 workers = {}          # { worker_uuid: socket }
 pending = 0           # requisições ainda não atribuídas
 pending_lock = threading.Lock()
+task_queue = []       # fila de tarefas aguardando worker
+task_queue_lock = threading.Lock()
 
 
 # ── Envio de mensagem JSON ───────────────────────────────────
@@ -45,15 +47,54 @@ def receive(sock):
 def valid_heartbeat(msg):
     if not isinstance(msg, dict):
         return False
-    if msg.get("TASK") != "HEARTBEAT":
-        return False
+    if msg.get("TASK") == "HEARTBEAT":
+        server_uuid = msg.get("SERVER_UUID")
+        if not isinstance(server_uuid, str) or not server_uuid.strip():
+            return False
+        return True
+    if msg.get("WORKER") == "ALIVE":
+        worker_uuid = msg.get("WORKER_UUID")
+        if not isinstance(worker_uuid, str) or not worker_uuid.strip():
+            return False
+        return True
+    return False
+
+
+def build_alive_response():
+    return {"SERVER_UUID": SERVER_UUID, "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"}
+
+
+def borrowed_worker(msg):
     server_uuid = msg.get("SERVER_UUID")
-    if not isinstance(server_uuid, str) or not server_uuid.strip():
-        return False
-    return True
+    return isinstance(server_uuid, str) and server_uuid.strip() and server_uuid != SERVER_UUID
 
 
-# ── Trata mensagens vindas de um Worker conectado ────────────
+def enqueue_task(task_id, user):
+    # Fila da Sprint 2: cada item guarda a tarefa e o usuário associado.
+    with task_queue_lock:
+        task_queue.append({"TASK_ID": task_id, "USER": user})
+
+
+def dequeue_task():
+    with task_queue_lock:
+        if not task_queue:
+            return None
+        return task_queue.pop(0)
+
+
+def dispatch_next_task(conn, worker_uuid):
+    task = dequeue_task()
+    if task is None:
+        # Quando não há trabalho pendente, o Master responde explicitamente.
+        send(conn, {"TASK": "NO_TASK"})
+        print(f"[MASTER] Sem tarefa para o Worker {worker_uuid[:8]}.")
+        return
+
+    # Quando há fila, o Master entrega uma QUERY para o Worker processar.
+    send(conn, {"TASK": "QUERY", "USER": task["USER"], "TASK_ID": task["TASK_ID"]})
+    print(f"[MASTER] Enviando {task['TASK_ID']} para Worker {worker_uuid[:8]} | USER={task['USER']}")
+
+
 def handle_worker(worker_uuid, conn, first_msg=None):
     global pending
     msg = first_msg
@@ -66,13 +107,32 @@ def handle_worker(worker_uuid, conn, first_msg=None):
             conn.close()
             return
 
-        if msg.get("TASK") == "HEARTBEAT":
+        if msg.get("TASK") == "HEARTBEAT" or msg.get("WORKER") == "ALIVE":
             if not valid_heartbeat(msg):
-                print("[MASTER] HEARTBEAT inválido: campos obrigatórios ausentes.")
+                print("[MASTER] HEARTBEAT/APRESENTAÇÃO inválido: campos obrigatórios ausentes.")
                 workers.pop(worker_uuid, None)
                 conn.close()
                 return
-            send(conn, {"SERVER_UUID": SERVER_UUID, "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"})
+            if msg.get("WORKER") == "ALIVE":
+                origem = "emprestado" if borrowed_worker(msg) else "local"
+                workers[worker_uuid] = conn
+                print(f"[MASTER] Worker {origem} {worker_uuid[:8]} apresentado.")
+                # Na apresentação, o Master já libera a primeira tarefa da fila.
+                dispatch_next_task(conn, worker_uuid)
+            else:
+                send(conn, build_alive_response())
+
+                # Após o heartbeat, o Master pode liberar outra tarefa, se houver.
+                dispatch_next_task(conn, worker_uuid)
+
+        elif msg.get("TASK") == "QUERY" and msg.get("STATUS") in {"OK", "NOK"}:
+            task_id = msg.get("TASK_ID", "SEM_ID")
+            status = msg.get("STATUS")
+            with pending_lock:
+                pending = max(0, pending - 1)
+            print(f"[MASTER] Tarefa {task_id} concluída por {worker_uuid[:8]} com status {status}. Pendentes: {pending}")
+            # O ACK final fecha o ciclo de confirmação pedido na Sprint 2.
+            send(conn, {"STATUS": "ACK", "WORKER_UUID": worker_uuid, "TASK_ID": task_id})
 
         elif msg.get("TASK") == "task_done":
             task_id = msg.get("TASK_ID")
@@ -107,13 +167,17 @@ def accept_loop():
         task = msg.get("TASK", "")
         worker_uuid = msg.get("WORKER_UUID") or msg.get("SERVER_UUID") or str(uuid.uuid4())
 
-        # Heartbeat do Worker
-        if task == "HEARTBEAT":
+        # Heartbeat ou apresentação do Worker
+        if task == "HEARTBEAT" or msg.get("WORKER") == "ALIVE":
             if not valid_heartbeat(msg):
-                print(f"[MASTER] HEARTBEAT inválido de {addr}. Conexão encerrada.")
+                print(f"[MASTER] HEARTBEAT/APRESENTAÇÃO inválido de {addr}. Conexão encerrada.")
                 conn.close()
                 continue
-            print(f"[MASTER] Heartbeat recebido de {worker_uuid[:8]}.")
+            if msg.get("WORKER") == "ALIVE":
+                origem = "emprestado" if borrowed_worker(msg) else "próprio"
+                print(f"[MASTER] Worker {origem} {worker_uuid[:8]} apresentou-se de {addr}.")
+            else:
+                print(f"[MASTER] Heartbeat recebido de {worker_uuid[:8]}.")
             threading.Thread(target=handle_worker, args=(worker_uuid, conn, msg), daemon=True).start()
 
         # Worker se registrando
@@ -144,29 +208,25 @@ def accept_loop():
 # ── Gera requisições e envia para workers disponíveis ────────
 def load_generator():
     global pending
+    users = ["User1", "User2", "User3", "User4"]
     count = 0
     while True:
         time.sleep(REQUEST_INTERVAL)
 
-        if not workers:
-            print("[MASTER] Sem workers disponíveis. Aguardando...")
-            continue
+        task_id = f"TASK-{count:04d}"
+        user = users[count % len(users)]
+        count += 1
+
+        # Em vez de enviar direto, a Sprint 2 usa uma fila interna de tarefas.
+        enqueue_task(task_id, user)
 
         with pending_lock:
             pending += 1
             current_pending = pending
 
-        task_id = f"TASK-{count:04d}"
-        count += 1
+        print(f"[MASTER] Tarefa {task_id} enfileirada para {user}. Pendentes: {current_pending}")
 
-        # Escolhe um worker (round-robin simples)
-        worker_uuid = list(workers.keys())[count % len(workers)]
-        sock = workers[worker_uuid]
-
-        print(f"[MASTER] Enviando {task_id} → Worker {worker_uuid[:8]} | Pendentes: {current_pending}")
-        send(sock, {"TASK": "assign_task", "TASK_ID": task_id, "DURATION": TASK_DURATION})
-
-        # Verifica saturação
+        # Verifica saturação da mesma forma, agora com base na fila.
         if current_pending > LOAD_THRESHOLD:
             print(f"[MASTER] SATURADO! ({current_pending} pendentes). Pedindo ajuda...")
             threading.Thread(target=ask_for_help, daemon=True).start()

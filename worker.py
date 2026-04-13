@@ -23,6 +23,7 @@ from config import (
     HEARTBEAT_INTERVAL,
     HEARTBEAT_TIMEOUT,
     MASTER_PORT,
+    TASK_DURATION,
     CONNECTION_ERROR_THRESHOLD,
     ELECTION_PORT,
     ELECTION_RETRY_INTERVAL,
@@ -34,6 +35,11 @@ master_target = {"host": None, "port": None}
 master_target_lock = threading.Lock()
 master_process = None
 master_process_lock = threading.Lock()
+
+original_master_target = None
+original_master_uuid = None
+current_master_uuid = None
+last_registration_master_uuid = None
 
 
 # ── Envio de mensagem JSON ───────────────────────────────────
@@ -58,6 +64,17 @@ def receive(sock):
         return None
 
 
+def receive_with_timeout(sock, timeout_seconds):
+    original_timeout = sock.gettimeout()
+    try:
+        sock.settimeout(timeout_seconds)
+        return receive(sock)
+    except socket.timeout:
+        return None
+    finally:
+        sock.settimeout(original_timeout)
+
+
 # ── Conecta no Master ───────────────────────────────────────
 def connect(host, port):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -76,14 +93,73 @@ def local_addresses():
     return hosts
 
 
+def build_presentation_payload():
+    current_host, current_port = get_master_target()
+    payload = {
+        # Apresentação inicial do Worker para o Master.
+        "WORKER": "ALIVE",
+        "WORKER_UUID": WORKER_UUID,
+    }
+
+    borrowed = (
+        original_master_target is not None
+        and original_master_uuid is not None
+        and (current_host, current_port) != original_master_target
+    )
+
+    if borrowed:
+        # Quando o Worker estiver emprestado, informa o Master original.
+        payload["SERVER_UUID"] = original_master_uuid
+
+    return payload
+
+
+def process_task(sock, task_msg):
+    task_id = task_msg.get("TASK_ID", "SEM_ID")
+    user = task_msg.get("USER", "desconhecido")
+
+    # Simula o processamento do trabalho recebido do Master.
+    print(f"[WORKER] Processando tarefa {task_id} para {user}...")
+    time.sleep(TASK_DURATION)
+
+    status_payload = {
+        # Reporte de status exigido na Sprint 2.
+        "STATUS": "OK",
+        "TASK": "QUERY",
+        "WORKER_UUID": WORKER_UUID,
+        "TASK_ID": task_id,
+    }
+    send(sock, status_payload)
+
+    ack = receive(sock)
+    if ack and ack.get("STATUS") == "ACK":
+        print(f"[WORKER] ACK recebido da tarefa {task_id}.")
+    else:
+        print(f"[WORKER] Sem ACK explícito para a tarefa {task_id}.")
+
+
+def handle_master_message(sock, msg):
+    if not isinstance(msg, dict):
+        return
+
+    if msg.get("TASK") == "QUERY":
+        process_task(sock, msg)
+    elif msg.get("TASK") == "NO_TASK":
+        print("[WORKER] Master informou que não há tarefa na fila.")
+    elif msg.get("TASK") == "HEARTBEAT" and msg.get("RESPONSE") == "ALIVE":
+        print("[WORKER] Heartbeat confirmado pelo Master.")
+
 def is_local_host(host):
     return host in local_addresses()
 
 
 def set_master_target(host, port, reason=""):
+    global original_master_target
     with master_target_lock:
         master_target["host"] = host
         master_target["port"] = port
+        if original_master_target is None:
+            original_master_target = (host, port)
     if reason:
         print(f"[WORKER] Novo master alvo: {host}:{port} ({reason})")
 
@@ -242,8 +318,37 @@ def run_master_election():
     return winner_host, winner_port
 
 
+def register_with_master(sock):
+    global original_master_uuid, current_master_uuid, last_registration_master_uuid
+
+    payload = build_presentation_payload()
+    send(sock, payload)
+
+    response = receive(sock)
+    if not response:
+        return None
+
+    print(f"[WORKER] Apresentacao enviada: {payload}")
+
+    if response.get("TASK") == "HEARTBEAT" and response.get("RESPONSE") == "ALIVE":
+        print("[WORKER] Master respondeu com ALIVE durante a apresentação.")
+        response = receive_with_timeout(sock, 0.1)
+        if response is None:
+            last_registration_master_uuid = current_master_uuid
+            return {"TASK": "NO_TASK"}
+
+    if response.get("TASK") == "QUERY":
+        process_task(sock, response)
+    elif response.get("TASK") == "NO_TASK":
+        print("[WORKER] Master informou que não havia tarefa na apresentação.")
+
+    last_registration_master_uuid = current_master_uuid
+    return response
+
 # ── Loop principal: heartbeat periódico com reconexão ────────
 def run(host, port):
+    global original_master_uuid, current_master_uuid, last_registration_master_uuid
+
     set_master_target(host, port, "inicial")
     threading.Thread(target=election_server, daemon=True).start()
 
@@ -257,6 +362,10 @@ def run(host, port):
             if sock is None:
                 sock = connect(target_host, target_port)
 
+                response = register_with_master(sock)
+                if response is None:
+                    raise TimeoutError("Resposta inválida ou ausente do Master na apresentacao")
+
             heartbeat = {"SERVER_UUID": master_server_uuid, "TASK": "HEARTBEAT"}
             send(sock, heartbeat)
 
@@ -264,11 +373,19 @@ def run(host, port):
             if msg and msg.get("TASK") == "HEARTBEAT" and msg.get("RESPONSE") == "ALIVE":
                 response_server_uuid = msg.get("SERVER_UUID")
                 if isinstance(response_server_uuid, str) and response_server_uuid.strip():
+                    current_master_uuid = response_server_uuid
+                    if original_master_uuid is None:
+                        original_master_uuid = response_server_uuid
                     master_server_uuid = response_server_uuid
+                    last_registration_master_uuid = response_server_uuid
                 print("[WORKER] Status: ALIVE")
                 consecutive_errors = 0
             else:
                 raise TimeoutError("Resposta inválida ou ausente do Master")
+
+            task_msg = receive_with_timeout(sock, 0.1)
+            if task_msg is not None:
+                handle_master_message(sock, task_msg)
 
             time.sleep(HEARTBEAT_INTERVAL)
 
@@ -284,6 +401,7 @@ def run(host, port):
             except OSError:
                 pass
             sock = None
+            last_registration_master_uuid = None
 
             if consecutive_errors >= CONNECTION_ERROR_THRESHOLD:
                 print("[WORKER] Downtime detectado. Iniciando eleicao de master.")
