@@ -117,6 +117,7 @@ def build_presentation_payload():
 def process_task(sock, task_msg):
     task_id = task_msg.get("TASK_ID", "SEM_ID")
     user = task_msg.get("USER", "desconhecido")
+    force_nok = bool(task_msg.get("FORCE_NOK", False))
 
     # Simula o processamento do trabalho recebido do Master.
     print(f"[WORKER] Processando tarefa {task_id} para {user}...")
@@ -124,7 +125,7 @@ def process_task(sock, task_msg):
 
     status_payload = {
         # Reporte de status exigido na Sprint 2.
-        "STATUS": "OK",
+        "STATUS": "NOK" if force_nok else "OK",
         "TASK": "QUERY",
         "WORKER_UUID": WORKER_UUID,
         "TASK_ID": task_id,
@@ -328,14 +329,13 @@ def register_with_master(sock):
     if not response:
         return None
 
-    print(f"[WORKER] Apresentacao enviada: {payload}")
+    response_server_uuid = response.get("SERVER_UUID")
+    if isinstance(response_server_uuid, str) and response_server_uuid.strip():
+        current_master_uuid = response_server_uuid
+        if original_master_uuid is None:
+            original_master_uuid = response_server_uuid
 
-    if response.get("TASK") == "HEARTBEAT" and response.get("RESPONSE") == "ALIVE":
-        print("[WORKER] Master respondeu com ALIVE durante a apresentação.")
-        response = receive_with_timeout(sock, 0.1)
-        if response is None:
-            last_registration_master_uuid = current_master_uuid
-            return {"TASK": "NO_TASK"}
+    print(f"[WORKER] Apresentacao enviada: {payload}")
 
     if response.get("TASK") == "QUERY":
         process_task(sock, response)
@@ -352,7 +352,6 @@ def run(host, port):
     set_master_target(host, port, "inicial")
     threading.Thread(target=election_server, daemon=True).start()
 
-    master_server_uuid = "UNKNOWN_MASTER"
     sock = None
     consecutive_errors = 0
 
@@ -362,30 +361,12 @@ def run(host, port):
             if sock is None:
                 sock = connect(target_host, target_port)
 
-                response = register_with_master(sock)
-                if response is None:
-                    raise TimeoutError("Resposta inválida ou ausente do Master na apresentacao")
+            # Na Sprint 2 o Worker solicita trabalho com payload WORKER=ALIVE.
+            response = register_with_master(sock)
+            if response is None:
+                raise TimeoutError("Resposta inválida ou ausente do Master na solicitacao")
 
-            heartbeat = {"SERVER_UUID": master_server_uuid, "TASK": "HEARTBEAT"}
-            send(sock, heartbeat)
-
-            msg = receive(sock)
-            if msg and msg.get("TASK") == "HEARTBEAT" and msg.get("RESPONSE") == "ALIVE":
-                response_server_uuid = msg.get("SERVER_UUID")
-                if isinstance(response_server_uuid, str) and response_server_uuid.strip():
-                    current_master_uuid = response_server_uuid
-                    if original_master_uuid is None:
-                        original_master_uuid = response_server_uuid
-                    master_server_uuid = response_server_uuid
-                    last_registration_master_uuid = response_server_uuid
-                print("[WORKER] Status: ALIVE")
-                consecutive_errors = 0
-            else:
-                raise TimeoutError("Resposta inválida ou ausente do Master")
-
-            task_msg = receive_with_timeout(sock, 0.1)
-            if task_msg is not None:
-                handle_master_message(sock, task_msg)
+            consecutive_errors = 0
 
             time.sleep(HEARTBEAT_INTERVAL)
 
@@ -406,7 +387,6 @@ def run(host, port):
             if consecutive_errors >= CONNECTION_ERROR_THRESHOLD:
                 print("[WORKER] Downtime detectado. Iniciando eleicao de master.")
                 run_master_election()
-                master_server_uuid = "UNKNOWN_MASTER"
                 consecutive_errors = 0
 
             time.sleep(ELECTION_RETRY_INTERVAL)

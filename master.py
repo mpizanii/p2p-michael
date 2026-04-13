@@ -69,10 +69,10 @@ def borrowed_worker(msg):
     return isinstance(server_uuid, str) and server_uuid.strip() and server_uuid != SERVER_UUID
 
 
-def enqueue_task(task_id, user):
-    # Fila da Sprint 2: cada item guarda a tarefa e o usuário associado.
+def enqueue_task(task_id, user, force_nok=False):
+    # Fila da Sprint 2: cada item guarda a tarefa e metadados de simulacao.
     with task_queue_lock:
-        task_queue.append({"TASK_ID": task_id, "USER": user})
+        task_queue.append({"TASK_ID": task_id, "USER": user, "FORCE_NOK": force_nok})
 
 
 def dequeue_task():
@@ -86,13 +86,45 @@ def dispatch_next_task(conn, worker_uuid):
     task = dequeue_task()
     if task is None:
         # Quando não há trabalho pendente, o Master responde explicitamente.
-        send(conn, {"TASK": "NO_TASK"})
+        send(conn, {"TASK": "NO_TASK", "SERVER_UUID": SERVER_UUID})
         print(f"[MASTER] Sem tarefa para o Worker {worker_uuid[:8]}.")
         return
 
     # Quando há fila, o Master entrega uma QUERY para o Worker processar.
-    send(conn, {"TASK": "QUERY", "USER": task["USER"], "TASK_ID": task["TASK_ID"]})
+    send(
+        conn,
+        {
+            "TASK": "QUERY",
+            "USER": task["USER"],
+            "TASK_ID": task["TASK_ID"],
+            "FORCE_NOK": task["FORCE_NOK"],
+            "SERVER_UUID": SERVER_UUID,
+        },
+    )
     print(f"[MASTER] Enviando {task['TASK_ID']} para Worker {worker_uuid[:8]} | USER={task['USER']}")
+
+
+def valid_status_report(msg):
+    if not isinstance(msg, dict):
+        return False
+
+    required = ("STATUS", "TASK", "WORKER_UUID")
+    for key in required:
+        if key not in msg:
+            return False
+
+    status = msg.get("STATUS")
+    task = msg.get("TASK")
+    worker_uuid = msg.get("WORKER_UUID")
+
+    if status not in {"OK", "NOK"}:
+        return False
+    if task != "QUERY":
+        return False
+    if not isinstance(worker_uuid, str) or not worker_uuid.strip():
+        return False
+
+    return True
 
 
 def handle_worker(worker_uuid, conn, first_msg=None):
@@ -125,7 +157,13 @@ def handle_worker(worker_uuid, conn, first_msg=None):
                 # Após o heartbeat, o Master pode liberar outra tarefa, se houver.
                 dispatch_next_task(conn, worker_uuid)
 
-        elif msg.get("TASK") == "QUERY" and msg.get("STATUS") in {"OK", "NOK"}:
+        elif "STATUS" in msg or msg.get("TASK") == "QUERY":
+            if not valid_status_report(msg):
+                print(f"[MASTER] Status inválido de {worker_uuid[:8]}. Encerrando conexão.")
+                workers.pop(worker_uuid, None)
+                conn.close()
+                return
+
             task_id = msg.get("TASK_ID", "SEM_ID")
             status = msg.get("STATUS")
             with pending_lock:
@@ -215,10 +253,11 @@ def load_generator():
 
         task_id = f"TASK-{count:04d}"
         user = users[count % len(users)]
+        force_nok = (count % 5 == 0)
         count += 1
 
         # Em vez de enviar direto, a Sprint 2 usa uma fila interna de tarefas.
-        enqueue_task(task_id, user)
+        enqueue_task(task_id, user, force_nok)
 
         with pending_lock:
             pending += 1
