@@ -1,22 +1,36 @@
 #!/usr/bin/env python3
 # ============================================================
 #  master.py
-#  - Aceita conexões de Workers
-#  - Gera requisições e ENVIA tarefas para os Workers
-#  - Monitora saturação e negocia com Master vizinho
+#  - Aceita conexoes de Workers
+#  - Responde a descoberta UDP com nome e porta do Master
+#  - Confirma a eleicao via TCP antes do fluxo de heartbeat
+#  - Gera requisicoes e ENVIA tarefas para os Workers
+#  - Monitora saturacao e negocia com Master vizinho
 # ============================================================
 
+import json
 import socket
 import threading
 import time
 import uuid
-import json
 
-from config import SERVER_UUID, MASTER_HOST, MASTER_PORT, LOAD_THRESHOLD, TASK_DURATION, REQUEST_INTERVAL, NEIGHBOR_MASTERS, SPRINT1_HEARTBEAT_ONLY
+from config import (
+    SERVER_UUID,
+    MASTER_NAME,
+    MASTER_HOST,
+    MASTER_BIND_HOST,
+    MASTER_PORT,
+    DISCOVERY_PORT,
+    LOAD_THRESHOLD,
+    TASK_DURATION,
+    REQUEST_INTERVAL,
+    NEIGHBOR_MASTERS,
+    SPRINT1_HEARTBEAT_ONLY,
+)
 
 # ── Estado global ────────────────────────────────────────────
 workers = {}          # { worker_uuid: socket }
-pending = 0           # requisições ainda não atribuídas
+pending = 0           # requisicoes ainda nao atribuidas
 pending_lock = threading.Lock()
 task_queue = []       # fila de tarefas aguardando worker
 task_queue_lock = threading.Lock()
@@ -44,6 +58,13 @@ def receive(sock):
         return None
 
 
+def decode_datagram(data):
+    try:
+        return json.loads(data.decode().strip())
+    except Exception:
+        return None
+
+
 def valid_heartbeat(msg):
     if not isinstance(msg, dict):
         return False
@@ -62,6 +83,52 @@ def valid_heartbeat(msg):
 
 def build_alive_response():
     return {"SERVER_UUID": SERVER_UUID, "TASK": "HEARTBEAT", "RESPONSE": "ALIVE"}
+
+
+def valid_discovery_request(msg):
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("TYPE") != "DISCOVERY":
+        return False
+    worker_uuid = msg.get("WORKER_UUID")
+    return isinstance(worker_uuid, str) and worker_uuid.strip()
+
+
+def build_discovery_reply():
+    return {
+        "TYPE": "DISCOVERY_REPLY",
+        "MASTER_NAME": MASTER_NAME,
+        "MASTER_IP": MASTER_HOST,
+        "MASTER_PORT": MASTER_PORT,
+        "STATUS": "AVAILABLE",
+        "SERVER_UUID": SERVER_UUID,
+    }
+
+
+def valid_election_ack(msg):
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("TYPE") != "ELECTION_ACK":
+        return False
+    worker_uuid = msg.get("WORKER_UUID")
+    selected_master = msg.get("SELECTED_MASTER")
+    if not isinstance(worker_uuid, str) or not worker_uuid.strip():
+        return False
+    if not isinstance(selected_master, str) or not selected_master.strip():
+        return False
+    return True
+
+
+def build_election_ack_response(worker_uuid):
+    return {
+        "TYPE": "ELECTION_ACK",
+        "STATUS": "ACCEPTED",
+        "MASTER_NAME": MASTER_NAME,
+        "MASTER_IP": MASTER_HOST,
+        "MASTER_PORT": MASTER_PORT,
+        "SERVER_UUID": SERVER_UUID,
+        "WORKER_UUID": worker_uuid,
+    }
 
 
 def borrowed_worker(msg):
@@ -85,12 +152,12 @@ def dequeue_task():
 def dispatch_next_task(conn, worker_uuid):
     task = dequeue_task()
     if task is None:
-        # Quando não há trabalho pendente, o Master responde explicitamente.
+        # Quando nao ha trabalho pendente, o Master responde explicitamente.
         send(conn, {"TASK": "NO_TASK", "SERVER_UUID": SERVER_UUID})
         print(f"[MASTER] Sem tarefa para o Worker {worker_uuid[:8]}.")
         return
 
-    # Quando há fila, o Master entrega uma QUERY para o Worker processar.
+    # Quando ha fila, o Master entrega uma QUERY para o Worker processar.
     send(
         conn,
         {
@@ -139,9 +206,39 @@ def handle_worker(worker_uuid, conn, first_msg=None):
             conn.close()
             return
 
+        if msg.get("TYPE") == "ELECTION_ACK":
+            if not valid_election_ack(msg):
+                print(f"[MASTER] ELECTION_ACK invalido de {worker_uuid[:8]}. Encerrando conexao.")
+                workers.pop(worker_uuid, None)
+                conn.close()
+                return
+            if msg.get("SELECTED_MASTER") != MASTER_NAME:
+                print(
+                    f"[MASTER] Worker {worker_uuid[:8]} escolheu {msg.get('SELECTED_MASTER')} em vez de {MASTER_NAME}."
+                )
+                send(
+                    conn,
+                    {
+                        "TYPE": "ELECTION_ACK",
+                        "STATUS": "REJECTED",
+                        "MASTER_NAME": MASTER_NAME,
+                        "SERVER_UUID": SERVER_UUID,
+                        "WORKER_UUID": worker_uuid,
+                    },
+                )
+                workers.pop(worker_uuid, None)
+                conn.close()
+                return
+
+            workers[worker_uuid] = conn
+            print(f"[MASTER] ELECTION_ACK recebido de {worker_uuid[:8]} para {MASTER_NAME}.")
+            send(conn, build_election_ack_response(worker_uuid))
+            msg = None
+            continue
+
         if msg.get("TASK") == "HEARTBEAT" or msg.get("WORKER") == "ALIVE":
             if not valid_heartbeat(msg):
-                print("[MASTER] HEARTBEAT/APRESENTAÇÃO inválido: campos obrigatórios ausentes.")
+                print("[MASTER] HEARTBEAT/APRESENTACAO invalido: campos obrigatorios ausentes.")
                 workers.pop(worker_uuid, None)
                 conn.close()
                 return
@@ -149,17 +246,17 @@ def handle_worker(worker_uuid, conn, first_msg=None):
                 origem = "emprestado" if borrowed_worker(msg) else "local"
                 workers[worker_uuid] = conn
                 print(f"[MASTER] Worker {origem} {worker_uuid[:8]} apresentado.")
-                # Na apresentação, o Master já libera a primeira tarefa da fila.
+                # Na apresentacao, o Master ja libera a primeira tarefa da fila.
                 dispatch_next_task(conn, worker_uuid)
             else:
                 send(conn, build_alive_response())
 
-                # Após o heartbeat, o Master pode liberar outra tarefa, se houver.
+                # Apos o heartbeat, o Master pode liberar outra tarefa, se houver.
                 dispatch_next_task(conn, worker_uuid)
 
         elif "STATUS" in msg or msg.get("TASK") == "QUERY":
             if not valid_status_report(msg):
-                print(f"[MASTER] Status inválido de {worker_uuid[:8]}. Encerrando conexão.")
+                print(f"[MASTER] Status invalido de {worker_uuid[:8]}. Encerrando conexao.")
                 workers.pop(worker_uuid, None)
                 conn.close()
                 return
@@ -168,32 +265,51 @@ def handle_worker(worker_uuid, conn, first_msg=None):
             status = msg.get("STATUS")
             with pending_lock:
                 pending = max(0, pending - 1)
-            print(f"[MASTER] Tarefa {task_id} concluída por {worker_uuid[:8]} com status {status}. Pendentes: {pending}")
-            # O ACK final fecha o ciclo de confirmação pedido na Sprint 2.
+            print(f"[MASTER] Tarefa {task_id} concluida por {worker_uuid[:8]} com status {status}. Pendentes: {pending}")
+            # O ACK final fecha o ciclo de confirmacao pedido na Sprint 2.
             send(conn, {"STATUS": "ACK", "WORKER_UUID": worker_uuid, "TASK_ID": task_id})
 
         elif msg.get("TASK") == "task_done":
             task_id = msg.get("TASK_ID")
             with pending_lock:
                 pending = max(0, pending - 1)
-            print(f"[MASTER] Tarefa {task_id} concluída por {worker_uuid[:8]}. Pendentes: {pending}")
+            print(f"[MASTER] Tarefa {task_id} concluida por {worker_uuid[:8]}. Pendentes: {pending}")
 
         elif msg.get("TASK") == "register_worker" or msg.get("TASK") == "register_temporary_worker":
-            # Worker temporário se registrou
+            # Worker temporario se registrou.
             wid = msg.get("WORKER_UUID", worker_uuid)
             workers[wid] = conn
-            print(f"[MASTER] Worker {'temporário ' if 'temporary' in msg.get('TASK','') else ''}{wid[:8]} registrado.")
+            print(f"[MASTER] Worker {'temporario ' if 'temporary' in msg.get('TASK','') else ''}{wid[:8]} registrado.")
 
         msg = None
 
 
-# ── Aceita conexões de Workers ───────────────────────────────
+def discovery_loop():
+    udp_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    udp_server.bind((MASTER_BIND_HOST, DISCOVERY_PORT))
+    print(f"[MASTER] Descoberta UDP ativa em {MASTER_BIND_HOST}:{DISCOVERY_PORT} | nome={MASTER_NAME}")
+
+    while True:
+        data, addr = udp_server.recvfrom(4096)
+        msg = decode_datagram(data)
+        if not valid_discovery_request(msg):
+            print(f"[MASTER] Discovery invalido de {addr}. Ignorando.")
+            continue
+
+        reply = build_discovery_reply()
+        sendto_payload = (json.dumps(reply) + "\n").encode()
+        udp_server.sendto(sendto_payload, addr)
+        print(f"[MASTER] Discovery reply enviado para {msg['WORKER_UUID'][:8]} em {addr[0]}:{addr[1]}.")
+
+
+# ── Aceita conexoes de Workers ───────────────────────────────
 def accept_loop():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((MASTER_HOST, MASTER_PORT))
+    server.bind((MASTER_BIND_HOST, MASTER_PORT))
     server.listen(20)
-    print(f"[MASTER] Escutando em {MASTER_HOST}:{MASTER_PORT}")
+    print(f"[MASTER] Escutando em {MASTER_BIND_HOST}:{MASTER_PORT} | anunciado como {MASTER_HOST}:{MASTER_PORT}")
 
     while True:
         conn, addr = server.accept()
@@ -205,27 +321,25 @@ def accept_loop():
         task = msg.get("TASK", "")
         worker_uuid = msg.get("WORKER_UUID") or msg.get("SERVER_UUID") or str(uuid.uuid4())
 
-        # Heartbeat ou apresentação do Worker
-        if task == "HEARTBEAT" or msg.get("WORKER") == "ALIVE":
-            if not valid_heartbeat(msg):
-                print(f"[MASTER] HEARTBEAT/APRESENTAÇÃO inválido de {addr}. Conexão encerrada.")
-                conn.close()
-                continue
-            if msg.get("WORKER") == "ALIVE":
-                origem = "emprestado" if borrowed_worker(msg) else "próprio"
+        # Heartbeat, apresentacao ou primeiro ACK da eleicao do Worker.
+        if task == "HEARTBEAT" or msg.get("WORKER") == "ALIVE" or msg.get("TYPE") == "ELECTION_ACK":
+            if msg.get("TYPE") == "ELECTION_ACK":
+                print(f"[MASTER] Worker {worker_uuid[:8]} iniciou handshake de eleicao de {addr}.")
+            elif msg.get("WORKER") == "ALIVE":
+                origem = "emprestado" if borrowed_worker(msg) else "proprio"
                 print(f"[MASTER] Worker {origem} {worker_uuid[:8]} apresentou-se de {addr}.")
             else:
                 print(f"[MASTER] Heartbeat recebido de {worker_uuid[:8]}.")
             threading.Thread(target=handle_worker, args=(worker_uuid, conn, msg), daemon=True).start()
 
-        # Worker se registrando
+        # Worker se registrando.
         elif "register" in task:
             workers[worker_uuid] = conn
-            kind = "temporário" if "temporary" in task else "próprio"
+            kind = "temporario" if "temporary" in task else "proprio"
             print(f"[MASTER] Worker {kind} {worker_uuid[:8]} conectado de {addr}.")
             threading.Thread(target=handle_worker, args=(worker_uuid, conn, msg), daemon=True).start()
 
-        # Master vizinho pedindo ajuda
+        # Master vizinho pedindo ajuda.
         elif task == "request_help":
             if SPRINT1_HEARTBEAT_ONLY:
                 print("[MASTER] Modo Sprint 1: ignorando request_help.")
@@ -233,7 +347,7 @@ def accept_loop():
                 continue
             handle_help_request(conn, msg)
 
-        # Master vizinho liberando workers emprestados
+        # Master vizinho liberando workers emprestados.
         elif task == "command_release":
             if SPRINT1_HEARTBEAT_ONLY:
                 print("[MASTER] Modo Sprint 1: ignorando command_release.")
@@ -243,7 +357,7 @@ def accept_loop():
             conn.close()
 
 
-# ── Gera requisições e envia para workers disponíveis ────────
+# ── Gera requisicoes e envia para workers disponiveis ────────
 def load_generator():
     global pending
     users = ["User1", "User2", "User3", "User4"]
@@ -265,7 +379,7 @@ def load_generator():
 
         print(f"[MASTER] Tarefa {task_id} enfileirada para {user}. Pendentes: {current_pending}")
 
-        # Verifica saturação da mesma forma, agora com base na fila.
+        # Verifica saturacao da mesma forma, agora com base na fila.
         if current_pending > LOAD_THRESHOLD:
             print(f"[MASTER] SATURADO! ({current_pending} pendentes). Pedindo ajuda...")
             threading.Thread(target=ask_for_help, daemon=True).start()
@@ -289,13 +403,13 @@ def ask_for_help():
                 print(f"[MASTER] Vizinho {host}:{port} rejeitou.")
                 sock.close()
         except OSError as e:
-            print(f"[MASTER] Não conectou ao vizinho {host}:{port} — {e}")
+            print(f"[MASTER] Nao conectou ao vizinho {host}:{port} — {e}")
 
 
 # ── Responde pedido de ajuda de outro Master ─────────────────
 def handle_help_request(conn, msg):
     if len(workers) > 1:
-        # Empresta 1 worker
+        # Empresta 1 worker.
         w_uuid = list(workers.keys())[0]
         w_sock = workers[w_uuid]
         requester_host, _ = conn.getpeername()
@@ -313,8 +427,9 @@ def handle_help_request(conn, msg):
 
 # ── Entry point ──────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"[MASTER] Iniciando | UUID: {SERVER_UUID}")
+    print(f"[MASTER] Iniciando | UUID: {SERVER_UUID} | nome: {MASTER_NAME}")
     print(f"[MASTER] Suba workers com: python worker.py 127.0.0.1 {MASTER_PORT}")
+    threading.Thread(target=discovery_loop, daemon=True).start()
     if SPRINT1_HEARTBEAT_ONLY:
         print("[MASTER] Modo Sprint 1 ativo: apenas HEARTBEAT para demonstracao.")
         accept_loop()

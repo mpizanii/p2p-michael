@@ -2,22 +2,22 @@
 # ============================================================
 #  worker.py
 #  - Conecta em um Master e RECEBE tarefas
+#  - Descobre Masters por UDP quando nao recebe host/porta
+#  - Elegera o mesmo Master por nome e confirma via TCP
 #  - Processa (simula com sleep) e avisa que terminou
 #  - Pode ser redirecionado para outro Master
 # ============================================================
 #  Como usar:
 #    python worker.py 127.0.0.1 5000
+#    python worker.py
 # ============================================================
 
+import json
 import socket
+import sys
+import threading
 import time
 import uuid
-import json
-import sys
-import os
-import shutil
-import subprocess
-import threading
 
 from config import (
     HEARTBEAT_INTERVAL,
@@ -25,17 +25,16 @@ from config import (
     MASTER_PORT,
     TASK_DURATION,
     CONNECTION_ERROR_THRESHOLD,
-    ELECTION_PORT,
     ELECTION_RETRY_INTERVAL,
-    ELECTION_CANDIDATES,
+    DISCOVERY_PORT,
+    DISCOVERY_TIMEOUT,
+    DISCOVERY_BROADCAST_ADDRESS,
+    DISCOVERY_RETRY_DELAY,
 )
 
 WORKER_UUID = str(uuid.uuid4())
 master_target = {"host": None, "port": None}
 master_target_lock = threading.Lock()
-master_process = None
-master_process_lock = threading.Lock()
-
 original_master_target = None
 original_master_uuid = None
 current_master_uuid = None
@@ -84,19 +83,10 @@ def connect(host, port):
     return sock
 
 
-def local_addresses():
-    hosts = {"127.0.0.1", "localhost"}
-    try:
-        hosts.update(socket.gethostbyname_ex(socket.gethostname())[2])
-    except OSError:
-        pass
-    return hosts
-
-
 def build_presentation_payload():
     current_host, current_port = get_master_target()
     payload = {
-        # Apresentação inicial do Worker para o Master.
+        # Apresentacao inicial do Worker para o Master.
         "WORKER": "ALIVE",
         "WORKER_UUID": WORKER_UUID,
     }
@@ -136,7 +126,7 @@ def process_task(sock, task_msg):
     if ack and ack.get("STATUS") == "ACK":
         print(f"[WORKER] ACK recebido da tarefa {task_id}.")
     else:
-        print(f"[WORKER] Sem ACK explícito para a tarefa {task_id}.")
+        print(f"[WORKER] Sem ACK explicito para a tarefa {task_id}.")
 
 
 def handle_master_message(sock, msg):
@@ -146,12 +136,9 @@ def handle_master_message(sock, msg):
     if msg.get("TASK") == "QUERY":
         process_task(sock, msg)
     elif msg.get("TASK") == "NO_TASK":
-        print("[WORKER] Master informou que não há tarefa na fila.")
+        print("[WORKER] Master informou que nao ha tarefa na fila.")
     elif msg.get("TASK") == "HEARTBEAT" and msg.get("RESPONSE") == "ALIVE":
         print("[WORKER] Heartbeat confirmado pelo Master.")
-
-def is_local_host(host):
-    return host in local_addresses()
 
 
 def set_master_target(host, port, reason=""):
@@ -159,9 +146,9 @@ def set_master_target(host, port, reason=""):
     with master_target_lock:
         master_target["host"] = host
         master_target["port"] = port
-        if original_master_target is None:
+        if original_master_target is None and host is not None and port is not None:
             original_master_target = (host, port)
-    if reason:
+    if reason and host is not None and port is not None:
         print(f"[WORKER] Novo master alvo: {host}:{port} ({reason})")
 
 
@@ -170,153 +157,140 @@ def get_master_target():
         return master_target["host"], master_target["port"]
 
 
-def get_free_disk_bytes():
-    project_dir = os.path.dirname(os.path.abspath(__file__))
-    return shutil.disk_usage(project_dir).free
+def build_discovery_payload():
+    # O worker manda apenas o necessario para a etapa 01.
+    return {
+        "TYPE": "DISCOVERY",
+        "WORKER_UUID": WORKER_UUID,
+    }
 
 
-def ensure_local_master_running():
-    global master_process
-    with master_process_lock:
-        if master_process is not None and master_process.poll() is None:
-            return
-        master_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master.py")
-        master_process = subprocess.Popen([sys.executable, master_file], cwd=os.path.dirname(master_file))
-        print("[WORKER] Este no foi eleito master. Iniciando master.py local.")
-
-
-def unique_candidates():
-    ordered = []
-    for host in ELECTION_CANDIDATES:
-        if host and host not in ordered:
-            ordered.append(host)
-    for host in local_addresses():
-        if host not in ordered:
-            ordered.append(host)
-    return ordered
-
-
-def handle_election_message(conn):
-    msg = receive(conn)
-    if msg is None:
-        conn.close()
-        return
-
-    task = msg.get("TASK")
-    if task == "ELECTION_QUERY":
-        send(
-            conn,
-            {
-                "TASK": "ELECTION_RESPONSE",
-                "WORKER_UUID": WORKER_UUID,
-                "FREE_BYTES": get_free_disk_bytes(),
-            },
-        )
-
-    elif task == "ELECTION_ANNOUNCE":
-        new_host = msg.get("NEW_MASTER_HOST")
-        new_port = int(msg.get("NEW_MASTER_PORT", MASTER_PORT))
-        if isinstance(new_host, str) and new_host:
-            set_master_target(new_host, new_port, "consenso")
-            if is_local_host(new_host):
-                ensure_local_master_running()
-            send(conn, {"TASK": "ACK", "WORKER_UUID": WORKER_UUID})
-
-    conn.close()
-
-
-def election_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", ELECTION_PORT))
-    server.listen(20)
-    print(f"[WORKER] Servidor de eleicao ativo em 0.0.0.0:{ELECTION_PORT}")
-
-    while True:
-        conn, _ = server.accept()
-        threading.Thread(target=handle_election_message, args=(conn,), daemon=True).start()
-
-
-def query_candidate_disk(host):
-    if is_local_host(host):
-        return {"host": host, "free_bytes": get_free_disk_bytes()}
-
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(HEARTBEAT_TIMEOUT)
-        sock.connect((host, ELECTION_PORT))
-        send(sock, {"TASK": "ELECTION_QUERY", "WORKER_UUID": WORKER_UUID})
-        resp = receive(sock)
-        sock.close()
-        if resp and resp.get("TASK") == "ELECTION_RESPONSE":
-            free_bytes = int(resp.get("FREE_BYTES", -1))
-            if free_bytes >= 0:
-                return {"host": host, "free_bytes": free_bytes}
-    except (OSError, ValueError):
-        return None
-    return None
-
-
-def announce_winner(host, winner_host, winner_port):
-    if is_local_host(host):
-        set_master_target(winner_host, winner_port, "consenso local")
-        if is_local_host(winner_host):
-            ensure_local_master_running()
-        return True
-
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(HEARTBEAT_TIMEOUT)
-        sock.connect((host, ELECTION_PORT))
-        send(
-            sock,
-            {
-                "TASK": "ELECTION_ANNOUNCE",
-                "NEW_MASTER_HOST": winner_host,
-                "NEW_MASTER_PORT": winner_port,
-                "INITIATOR_UUID": WORKER_UUID,
-            },
-        )
-        ack = receive(sock)
-        sock.close()
-        return bool(ack and ack.get("TASK") == "ACK")
-    except OSError:
+def valid_discovery_reply(msg):
+    if not isinstance(msg, dict):
+        return False
+    if msg.get("TYPE") != "DISCOVERY_REPLY":
         return False
 
+    master_name = msg.get("MASTER_NAME")
+    master_ip = msg.get("MASTER_IP")
+    master_port = msg.get("MASTER_PORT")
+    status = msg.get("STATUS")
 
-def run_master_election():
-    candidates = unique_candidates()
-    results = []
-    for host in candidates:
-        data = query_candidate_disk(host)
-        if data is not None:
-            results.append(data)
+    if not isinstance(master_name, str) or not master_name.strip():
+        return False
+    if not isinstance(master_ip, str) or not master_ip.strip():
+        return False
+    if status != "AVAILABLE":
+        return False
+    try:
+        int(master_port)
+    except (TypeError, ValueError):
+        return False
+    return True
 
-    if not results:
-        current_host, current_port = get_master_target()
-        print("[WORKER] Eleicao falhou: nenhum candidato respondeu.")
-        return current_host, current_port
 
-    winner = max(results, key=lambda item: (item["free_bytes"], item["host"]))
-    winner_host = winner["host"]
-    winner_port = MASTER_PORT
-    print(f"[WORKER] Eleicao: novo master = {winner_host} (free={winner['free_bytes']} bytes)")
+def send_discovery_probes(sock):
+    payload = (json.dumps(build_discovery_payload()) + "\n").encode()
+    targets = [
+        (DISCOVERY_BROADCAST_ADDRESS, DISCOVERY_PORT),
+        ("127.0.0.1", DISCOVERY_PORT),
+    ]
 
-    ack_count = 0
-    for host in candidates:
-        if announce_winner(host, winner_host, winner_port):
-            ack_count += 1
+    for target in targets:
+        try:
+            sock.sendto(payload, target)
+            print(f"[WORKER][DISCOVERY] Probe enviado para {target[0]}:{target[1]}.")
+        except OSError as error:
+            print(f"[WORKER][DISCOVERY] Falha ao enviar probe para {target[0]}:{target[1]} - {error}")
 
-    required = (len(candidates) // 2) + 1
-    if ack_count >= required:
-        print(f"[WORKER] Consenso atingido: {ack_count}/{len(candidates)} ACKs.")
-    else:
-        print(f"[WORKER] Consenso parcial: {ack_count}/{len(candidates)} ACKs.")
 
-    set_master_target(winner_host, winner_port, "eleicao")
-    if is_local_host(winner_host):
-        ensure_local_master_running()
-    return winner_host, winner_port
+def collect_discovery_replies():
+    replies = []
+    seen = set()
+    discovery_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    discovery_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    discovery_socket.bind(("", 0))
+    discovery_socket.settimeout(0.5)
+
+    send_discovery_probes(discovery_socket)
+    deadline = time.time() + DISCOVERY_TIMEOUT
+
+    while time.time() < deadline:
+        remaining = deadline - time.time()
+        discovery_socket.settimeout(max(0.05, min(0.5, remaining)))
+        try:
+            data, addr = discovery_socket.recvfrom(4096)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+
+        try:
+            msg = json.loads(data.decode().strip())
+        except Exception:
+            print(f"[WORKER][DISCOVERY] Resposta invalida recebida de {addr}.")
+            continue
+
+        if not valid_discovery_reply(msg):
+            print(f"[WORKER][DISCOVERY] Resposta descoberta ignorada de {addr}.")
+            continue
+
+        master_name = msg["MASTER_NAME"].strip()
+        master_host = msg["MASTER_IP"].strip()
+        master_port = int(msg["MASTER_PORT"])
+        key = (master_name, master_host, master_port)
+        if key in seen:
+            continue
+        seen.add(key)
+        replies.append({"name": master_name, "host": master_host, "port": master_port})
+        print(f"[WORKER][DISCOVERY] Resposta valida de {master_name} em {master_host}:{master_port}.")
+
+    discovery_socket.close()
+    return replies
+
+
+def choose_discovery_winner(replies):
+    if not replies:
+        return None
+    return min(replies, key=lambda item: (item["name"], item["host"], item["port"]))
+
+
+def discover_master():
+    replies = collect_discovery_replies()
+    if not replies:
+        print("[WORKER][DISCOVERY] Nenhum Master respondeu dentro da janela de descoberta.")
+        return None
+
+    winner = choose_discovery_winner(replies)
+    print(
+        f"[WORKER][ELECTION] Vencedor escolhido por nome: {winner['name']} "
+        f"({winner['host']}:{winner['port']})."
+    )
+    return winner
+
+
+def perform_election_handshake(sock, selected_master_name):
+    # Esta eh a ponte entre a eleicao e o fluxo de heartbeat ja existente.
+    payload = {
+        "TYPE": "ELECTION_ACK",
+        "WORKER_UUID": WORKER_UUID,
+        "SELECTED_MASTER": selected_master_name,
+    }
+    send(sock, payload)
+    response = receive(sock)
+
+    if (
+        response
+        and response.get("TYPE") == "ELECTION_ACK"
+        and response.get("STATUS") == "ACCEPTED"
+        and response.get("MASTER_NAME") == selected_master_name
+    ):
+        print(f"[WORKER][ELECTION] ACK confirmado por {selected_master_name}.")
+        return True
+
+    print(f"[WORKER][ELECTION] ACK negado ou ausente para {selected_master_name}.")
+    return False
 
 
 def register_with_master(sock):
@@ -340,34 +314,59 @@ def register_with_master(sock):
     if response.get("TASK") == "QUERY":
         process_task(sock, response)
     elif response.get("TASK") == "NO_TASK":
-        print("[WORKER] Master informou que não havia tarefa na apresentação.")
+        print("[WORKER] Master informou que nao havia tarefa na apresentacao.")
 
     last_registration_master_uuid = current_master_uuid
     return response
 
-# ── Loop principal: heartbeat periódico com reconexão ────────
-def run(host, port):
+
+# ── Loop principal: heartbeat periodico com reconexao ────────
+def run(host=None, port=None):
     global original_master_uuid, current_master_uuid, last_registration_master_uuid
 
-    set_master_target(host, port, "inicial")
-    threading.Thread(target=election_server, daemon=True).start()
+    discovery_mode = host is None or port is None
+    if discovery_mode:
+        print("[WORKER][DISCOVERY] Iniciando sem host/porta configurados; usando descoberta UDP.")
+    else:
+        set_master_target(host, port, "inicial")
 
     sock = None
     consecutive_errors = 0
+    selected_master = None
 
     while True:
-        target_host, target_port = get_master_target()
         try:
+            if discovery_mode and sock is None:
+                selected_master = discover_master()
+                if selected_master is None:
+                    consecutive_errors += 1
+                    print(
+                        f"[WORKER] Status: OFFLINE - Nenhum Master encontrado "
+                        f"({consecutive_errors}/{CONNECTION_ERROR_THRESHOLD})"
+                    )
+                    time.sleep(DISCOVERY_RETRY_DELAY)
+                    continue
+                set_master_target(
+                    selected_master["host"],
+                    selected_master["port"],
+                    f"descoberta {selected_master['name']}",
+                )
+
+            target_host, target_port = get_master_target()
+            if target_host is None or target_port is None:
+                raise TimeoutError("Master alvo nao definido")
+
             if sock is None:
                 sock = connect(target_host, target_port)
+                if discovery_mode:
+                    if not perform_election_handshake(sock, selected_master["name"]):
+                        raise TimeoutError("Handshake de eleicao recusado")
 
-            # Na Sprint 2 o Worker solicita trabalho com payload WORKER=ALIVE.
             response = register_with_master(sock)
             if response is None:
-                raise TimeoutError("Resposta inválida ou ausente do Master na solicitacao")
+                raise TimeoutError("Resposta invalida ou ausente do Master na solicitacao")
 
             consecutive_errors = 0
-
             time.sleep(HEARTBEAT_INTERVAL)
 
         except (socket.timeout, TimeoutError, OSError):
@@ -384,23 +383,28 @@ def run(host, port):
             sock = None
             last_registration_master_uuid = None
 
-            if consecutive_errors >= CONNECTION_ERROR_THRESHOLD:
-                print("[WORKER] Downtime detectado. Iniciando eleicao de master.")
-                run_master_election()
-                consecutive_errors = 0
+            if discovery_mode:
+                selected_master = None
+                time.sleep(DISCOVERY_RETRY_DELAY)
+                continue
 
             time.sleep(ELECTION_RETRY_INTERVAL)
 
 
 # ── Entry point ──────────────────────────────────────────────
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Uso: python worker.py <host> <porta>")
-        print("Exemplo: python worker.py 127.0.0.1 5000")
+    if len(sys.argv) == 1:
+        print(f"[WORKER] UUID: {WORKER_UUID}")
+        run()
+    elif len(sys.argv) == 3:
+        host = sys.argv[1]
+        port = int(sys.argv[2])
+
+        print(f"[WORKER] UUID: {WORKER_UUID}")
+        run(host, port)
+    else:
+        print("Uso: python worker.py [<host> <porta>]")
+        print("Exemplos:")
+        print("  python worker.py")
+        print("  python worker.py 127.0.0.1 5000")
         sys.exit(1)
-
-    host = sys.argv[1]
-    port = int(sys.argv[2])
-
-    print(f"[WORKER] UUID: {WORKER_UUID}")
-    run(host, port)
