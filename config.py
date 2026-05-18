@@ -16,6 +16,7 @@ DISCOVERY_TIMEOUT = float(os.getenv("DISCOVERY_TIMEOUT", "3.0"))
 DISCOVERY_RETRY_DELAY = float(os.getenv("DISCOVERY_RETRY_DELAY", "2.0"))
 
 LOAD_THRESHOLD = 5
+RELEASE_THRESHOLD = int(os.getenv("RELEASE_THRESHOLD", "3"))
 TASK_DURATION = 3
 REQUEST_INTERVAL = 1.0
 HEARTBEAT_INTERVAL = 30.0
@@ -24,8 +25,29 @@ HEARTBEAT_TIMEOUT = 5.0
 SPRINT1_HEARTBEAT_ONLY = False
 CONNECTION_ERROR_THRESHOLD = 4
 ELECTION_RETRY_INTERVAL = 2.0
+SPRINT3_HELP_TIMEOUT = float(os.getenv("SPRINT3_HELP_TIMEOUT", "5.0"))
+SPRINT3_DEFAULT_WORKERS_TO_BORROW = int(os.getenv("SPRINT3_DEFAULT_WORKERS_TO_BORROW", "1"))
+
+
+def _parse_neighbor_masters(raw_value):
+	masters = []
+	if not raw_value:
+		return masters
+
+	for item in raw_value.split(","):
+		candidate = item.strip()
+		if not candidate:
+			continue
+		host, separator, port_text = candidate.partition(":")
+		if not separator:
+			continue
+		try:
+			masters.append((host.strip(), int(port_text.strip())))
+		except ValueError:
+			continue
+	return masters
 
 # Legacy neighbor settings remain for compatibility with the existing code path.
 ELECTION_PORT = 5100
 ELECTION_CANDIDATES = [MASTER_HOST]
-NEIGHBOR_MASTERS = []
+NEIGHBOR_MASTERS = _parse_neighbor_masters(os.getenv("NEIGHBOR_MASTERS", ""))
