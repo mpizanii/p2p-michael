@@ -30,6 +30,7 @@ from config import (
     SPRINT3_DEFAULT_WORKERS_TO_BORROW,
     SPRINT1_HEARTBEAT_ONLY,
 )
+import monitor as _monitor
 
 # ── Estado global ────────────────────────────────────────────
 workers = {}          # { worker_uuid: socket }
@@ -43,6 +44,17 @@ help_request_in_progress = False
 help_request_lock = threading.Lock()
 borrowed_outgoing_workers = {}
 borrowed_outgoing_workers_lock = threading.Lock()
+
+# ── Sprint 4 — rastreamento de métricas ──────────────────────
+MASTER_START_TIME = time.time()
+s4_tasks_running = set()                    # worker_uuids executando agora
+s4_tasks_running_lock = threading.Lock()
+s4_counters = {"tasks_ok": 0, "tasks_nok": 0, "workers_dropped": 0}
+s4_counters_lock = threading.Lock()
+s4_enqueue_times = {}                       # { task_id: timestamp_enqueue }
+s4_enqueue_lock = threading.Lock()
+s4_neighbor_status = {}                     # { "host:port": {"ok": bool, "ts": float} }
+s4_neighbor_lock = threading.Lock()
 
 
 # ── Envio de mensagem JSON ───────────────────────────────────
@@ -398,13 +410,18 @@ def enqueue_task(task_id, user, force_nok=False):
     # Fila da Sprint 2: cada item guarda a tarefa e metadados de simulacao.
     with task_queue_lock:
         task_queue.append({"TASK_ID": task_id, "USER": user, "FORCE_NOK": force_nok})
+    with s4_enqueue_lock:
+        s4_enqueue_times[task_id] = time.time()
 
 
 def dequeue_task():
     with task_queue_lock:
         if not task_queue:
             return None
-        return task_queue.pop(0)
+        task = task_queue.pop(0)
+    with s4_enqueue_lock:
+        s4_enqueue_times.pop(task.get("TASK_ID"), None)
+    return task
 
 
 def dispatch_next_task(conn, worker_uuid):
@@ -426,6 +443,8 @@ def dispatch_next_task(conn, worker_uuid):
             "SERVER_UUID": SERVER_UUID,
         },
     )
+    with s4_tasks_running_lock:
+        s4_tasks_running.add(worker_uuid)
     print(f"[MASTER] Enviando {task['TASK_ID']} para Worker {worker_uuid[:8]} | USER={task['USER']}")
 
 
@@ -460,7 +479,13 @@ def handle_worker(worker_uuid, conn, first_msg=None):
             msg = receive(conn)
         if msg is None:
             print(f"[MASTER] Worker {worker_uuid[:8]} desconectou.")
+            was_registered = get_worker_connection(worker_uuid) is not None
             remove_worker_session(worker_uuid)
+            with s4_tasks_running_lock:
+                s4_tasks_running.discard(worker_uuid)
+            if was_registered:
+                with s4_counters_lock:
+                    s4_counters["workers_dropped"] += 1
             try:
                 conn.close()
             except OSError:
@@ -543,6 +568,13 @@ def handle_worker(worker_uuid, conn, first_msg=None):
             status = msg.get("STATUS")
             with pending_lock:
                 pending = max(0, pending - 1)
+            with s4_tasks_running_lock:
+                s4_tasks_running.discard(worker_uuid)
+            with s4_counters_lock:
+                if status == "OK":
+                    s4_counters["tasks_ok"] += 1
+                else:
+                    s4_counters["tasks_nok"] += 1
             print(f"[MASTER] Tarefa {task_id} concluida por {worker_uuid[:8]} com status {status}. Pendentes: {pending}")
             # O ACK final fecha o ciclo de confirmacao pedido na Sprint 2.
             send(conn, {"STATUS": "ACK", "WORKER_UUID": worker_uuid, "TASK_ID": task_id})
@@ -704,10 +736,13 @@ def ask_for_help(current_pending):
     request_id = str(uuid.uuid4())
 
     for (host, port) in NEIGHBOR_MASTERS:
+        neighbor_key = f"{host}:{port}"
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(SPRINT3_HELP_TIMEOUT)
             sock.connect((host, port))
+            with s4_neighbor_lock:
+                s4_neighbor_status[neighbor_key] = {"ok": True, "ts": time.time()}
             payload = build_help_request_payload(current_pending, requested_workers)
             send(sock, build_protocol_message("request_help", payload, request_id))
 
@@ -729,6 +764,8 @@ def ask_for_help(current_pending):
                 print(f"[MASTER] Vizinho {host}:{port} nao respondeu adequadamente ao pedido de ajuda.")
                 sock.close()
         except OSError as e:
+            with s4_neighbor_lock:
+                s4_neighbor_status[neighbor_key] = {"ok": False, "ts": time.time()}
             print(f"[MASTER] Nao conectou ao vizinho {host}:{port} — {e}")
     finish_help_request()
 
@@ -771,11 +808,99 @@ def handle_help_request(conn, msg):
     conn.close()
 
 
+# ── Snapshot do estado da farm para o monitor (Sprint 4) ─────
+def get_farm_state():
+    now = time.time()
+
+    with worker_state_lock:
+        total_registered = len(workers)
+        local_uuids = [u for u, m in worker_metadata.items() if m.get("role") == "local"]
+        temp_items = [(u, dict(m)) for u, m in worker_metadata.items() if m.get("role") == "temporary"]
+
+    with borrowed_outgoing_workers_lock:
+        borrowed_out = list(borrowed_outgoing_workers.items())
+
+    with s4_tasks_running_lock:
+        running_count = len(s4_tasks_running)
+
+    with s4_counters_lock:
+        completed = s4_counters["tasks_ok"]
+        nok_count = s4_counters["tasks_nok"]
+        workers_dropped = s4_counters["workers_dropped"]
+
+    with s4_enqueue_lock:
+        oldest_age = int(now - min(s4_enqueue_times.values())) if s4_enqueue_times else 0
+
+    with pending_lock:
+        current_pending = pending
+
+    workers_home = len(local_uuids)
+    workers_received = len(temp_items)
+    workers_borrowed = len(borrowed_out)
+    workers_utilization = min(running_count, total_registered)
+    workers_idle = max(0, total_registered - workers_utilization)
+
+    borrowed_list = []
+    for _, info in borrowed_out:
+        borrowed_list.append({
+            "direction": "out",
+            "peer_uuid": info.get("target_master_name") or info.get("target_master_uuid", ""),
+        })
+    for _, meta in temp_items:
+        borrowed_list.append({
+            "direction": "in",
+            "peer_uuid": meta.get("owner_master_name") or meta.get("owner_master_uuid", ""),
+        })
+
+    neighbors_list = []
+    with s4_neighbor_lock:
+        for host, port in NEIGHBOR_MASTERS:
+            key = f"{host}:{port}"
+            info = s4_neighbor_status.get(key, {})
+            ts = info.get("ts", MASTER_START_TIME)
+            neighbors_list.append({
+                "server_uuid": key,
+                "status": "available" if info.get("ok", True) else "unavailable",
+                "last_heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
+            })
+
+    return {
+        "start_time": MASTER_START_TIME,
+        "workers": {
+            "total_registered": total_registered,
+            "workers_utilization": workers_utilization,
+            "workers_alive": total_registered,
+            "workers_idle": workers_idle,
+            "workers_borrowed": workers_borrowed,
+            "workers_received": workers_received,
+            "workers_failed": workers_dropped,
+            "workers_home": workers_home,
+            "workers_available_capacity": workers_idle,
+            "borrowed_workers": borrowed_list,
+        },
+        "tasks": {
+            "tasks_pending": current_pending,
+            "tasks_running": running_count,
+            "tasks_completed": completed,
+            "tasks_failed": nok_count,
+            "oldest_task_age_s": oldest_age,
+        },
+        "config_thresholds": {
+            "max_task": LOAD_THRESHOLD,
+            "warn_cpu_percent": 85,
+            "warn_memory_percent": 85,
+            "release_task": RELEASE_THRESHOLD,
+        },
+        "neighbors": neighbors_list,
+    }
+
+
 # ── Entry point ──────────────────────────────────────────────
 if __name__ == "__main__":
     print(f"[MASTER] Iniciando | UUID: {SERVER_UUID} | nome: {MASTER_NAME}")
     print(f"[MASTER] Suba workers com: python worker.py 127.0.0.1 {MASTER_PORT}")
     threading.Thread(target=discovery_loop, daemon=True).start()
+    threading.Thread(target=_monitor.monitor_loop, args=(get_farm_state,), daemon=True).start()
     if SPRINT1_HEARTBEAT_ONLY:
         print("[MASTER] Modo Sprint 1 ativo: apenas HEARTBEAT para demonstracao.")
         accept_loop()

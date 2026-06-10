@@ -1,4 +1,5 @@
 import os
+import socket as _socket
 import uuid
 
 SERVER_UUID = str(uuid.uuid4())
@@ -51,3 +52,11 @@ def _parse_neighbor_masters(raw_value):
 ELECTION_PORT = 5100
 ELECTION_CANDIDATES = [MASTER_HOST]
 NEIGHBOR_MASTERS = _parse_neighbor_masters(os.getenv("NEIGHBOR_MASTERS", ""))
+
+# Sprint 4 — Supervisor de métricas
+SUPERVISOR_HOST = os.getenv("SUPERVISOR_HOST", "nuted-ia.dev")
+SUPERVISOR_PORT = int(os.getenv("SUPERVISOR_PORT", "443"))
+SUPERVISOR_SNI = os.getenv("SUPERVISOR_SNI", "nuted-ia.dev")
+SUPERVISOR_INTERVAL = float(os.getenv("SUPERVISOR_INTERVAL", "10.0"))
+FARM_ID = os.getenv("FARM_ID", MASTER_NAME)
+FARM_HOSTNAME = os.getenv("FARM_HOSTNAME", _socket.gethostname())
