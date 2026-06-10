@@ -547,6 +547,10 @@ def handle_worker(worker_uuid, conn, first_msg=None):
             # O ACK final fecha o ciclo de confirmacao pedido na Sprint 2.
             send(conn, {"STATUS": "ACK", "WORKER_UUID": worker_uuid, "TASK_ID": task_id})
             release_temporary_workers_if_needed()
+            # Sprint 3: oferecer proxima tarefa imediatamente. Guarda verifica se o worker nao
+            # foi liberado por release_temporary_workers_if_needed antes de despachar.
+            if get_worker_connection(worker_uuid) is not None:
+                dispatch_next_task(conn, worker_uuid)
 
         elif msg.get("TASK") == "task_done":
             task_id = msg.get("TASK_ID")

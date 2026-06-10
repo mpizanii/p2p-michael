@@ -37,6 +37,7 @@ master_target = {"host": None, "port": None}
 master_target_lock = threading.Lock()
 original_master_target = None
 original_master_uuid = None
+original_master_name = None
 current_master_uuid = None
 last_registration_master_uuid = None
 pending_temporary_registration = False
@@ -137,6 +138,7 @@ def build_temporary_registration_message():
     payload = {
         "WORKER_UUID": WORKER_UUID,
         "ORIGINAL_MASTER_UUID": original_master_uuid,
+        "ORIGINAL_MASTER_NAME": original_master_name,
         "ORIGINAL_MASTER_HOST": original_host,
         "ORIGINAL_MASTER_PORT": original_port,
         "CURRENT_MASTER_HOST": current_host,
@@ -153,7 +155,7 @@ def build_registration_message():
 
 
 def handle_control_message(msg):
-    global pending_temporary_registration, current_master_uuid
+    global pending_temporary_registration, current_master_uuid, original_master_name
 
     message_type = protocol_message_type(msg)
     payload = protocol_payload(msg)
@@ -163,6 +165,10 @@ def handle_control_message(msg):
         new_port = payload.get("new_master_port") or msg.get("NEW_MASTER_PORT")
         new_master_name = payload.get("new_master_name") or msg.get("NEW_MASTER_NAME")
         if new_host is not None and new_port is not None:
+            # Preserva o nome do master original para incluir no register_temporary_worker.
+            orig_name = payload.get("original_master_name") or msg.get("ORIGINAL_MASTER_NAME")
+            if orig_name is not None and original_master_name is None:
+                original_master_name = orig_name
             set_master_target(new_host, int(new_port), f"redirecionado para {new_master_name or 'novo master'}")
             pending_temporary_registration = True
             print(
@@ -435,7 +441,7 @@ def register_with_master(sock):
 
 # ── Loop principal: heartbeat periodico com reconexao ────────
 def run(host=None, port=None):
-    global original_master_uuid, current_master_uuid, last_registration_master_uuid
+    global original_master_uuid, current_master_uuid, last_registration_master_uuid, original_master_name
 
     discovery_mode = host is None or port is None
     if discovery_mode:
@@ -474,6 +480,9 @@ def run(host=None, port=None):
                 if discovery_mode:
                     if not perform_election_handshake(sock, selected_master["name"]):
                         raise TimeoutError("Handshake de eleicao recusado")
+                    # Registra o nome do master eleito para uso em register_temporary_worker.
+                    if original_master_name is None:
+                        original_master_name = selected_master["name"]
 
             action = register_with_master(sock)
             if action == "reconnect":
