@@ -165,18 +165,101 @@ MA remove worker de borrowed_outgoing_workers
 
 ---
 
+## Sprint 4 — Monitor de Métricas via TLS TCP
+
+**Objetivo:** Coletar métricas do sistema e da farm a cada 10 segundos e enviá-las ao supervisor externo `nuted-ia.dev:443` via TLS TCP (fire-and-forget).
+
+### O que foi implementado
+
+**Novo arquivo `monitor.py`:**
+- Thread daemon iniciada junto com o Master
+- Coleta métricas do SO com `psutil` (CPU%, memória, disco, load average)
+- Monta payload JSON completo conforme schema `sprint4-monitor`
+- Conecta ao supervisor via TLS, envia JSON + `\n`, fecha sem receber resposta
+- Captura todas as exceções silenciosamente — falha de envio nunca para o Master
+
+**Métricas coletadas:**
+
+| Categoria     | Campo                | Fonte                          |
+|---------------|----------------------|--------------------------------|
+| Sistema       | `uptime_seconds`     | `time.time() - start_time`     |
+| Sistema       | `load_average_1m/5m` | `os.getloadavg()` (0.0 no Win) |
+| Sistema       | `cpu.usage_percent`  | `psutil.cpu_percent()`         |
+| Sistema       | `cpu.count_logical`  | `psutil.cpu_count(logical=True)`|
+| Sistema       | `memory.total_mb`    | `psutil.virtual_memory().total`|
+| Sistema       | `disk.total_gb`      | `shutil.disk_usage(".")`       |
+| Farm          | `workers.*`          | `get_farm_state()["workers"]`  |
+| Farm          | `tasks.*`            | `get_farm_state()["tasks"]`    |
+| Farm          | `config_thresholds`  | `LOAD_THRESHOLD`, `RELEASE_THRESHOLD` |
+| Farm          | `neighbors`          | `s4_neighbor_status` (M2M)     |
+
+**Novos globals em `master.py` (prefixo `s4_`):**
+- `s4_tasks_running` — set com UUIDs de workers atualmente processando tarefas
+- `s4_counters` — dict `{"tasks_ok": N, "tasks_nok": N, "workers_dropped": N}`
+- `s4_enqueue_times` — dict `{task_id: timestamp}` para calcular `oldest_task_age_s`
+- `s4_neighbor_status` — dict `{host:port: {"ok": bool, "ts": float}}`
+
+**Novos campos em `config.py`:**
+```python
+SUPERVISOR_HOST     # default: "nuted-ia.dev"
+SUPERVISOR_PORT     # default: 443
+SUPERVISOR_SNI      # default: "nuted-ia.dev"
+SUPERVISOR_INTERVAL # default: 10.0 segundos
+FARM_ID             # default: MASTER_NAME
+FARM_HOSTNAME       # default: socket.gethostname()
+```
+
+**Dependência externa adicionada:**
+- `psutil>=5.9.0` (primeira dep externa do projeto) — declarada em `requirements.txt`
+- Fallback automático se `psutil` não estiver instalado: todos os campos de CPU/memória retornam 0.0
+
+### Decisões de design
+
+**Padrão callback para evitar import circular:**
+`master.py` passa a função `get_farm_state` como parâmetro para `monitor.monitor_loop`.
+`monitor.py` não importa `master.py` — recebe o snapshot como argumento.
+
+**`except Exception` no loop:**
+Captura falhas de rede/TLS silenciosamente. `KeyboardInterrupt` não é capturado, permitindo que o Ctrl+C encerre o processo normalmente.
+
+**`os.getloadavg()` falha no Windows:**
+`try/except AttributeError` retorna `(0.0, 0.0)` — o atributo não existe no Windows.
+
+**Dict-based counters:**
+`s4_counters = {"tasks_ok": 0, ...}` evita declarações `global` em funções — mutação do dict não requer redeclaração.
+
+### Fluxo do monitor
+
+```
+Master inicia
+    └── Thread daemon monitor_loop(get_farm_state)
+            └── loop infinito a cada SUPERVISOR_INTERVAL (10s)
+                    ├── farm_state = get_farm_state()
+                    ├── report = build_performance_report(farm_state)
+                    ├── TLS connect nuted-ia.dev:443
+                    ├── sendall(json + "\n")
+                    ├── close (sem recv)
+                    └── except Exception → log + continua
+```
+
+---
+
 ## Resumo Comparativo das Sprints
 
-| Feature                            | Sprint 1 | Sprint 2 | Sprint 2.1 | Sprint 3 |
-|------------------------------------|:--------:|:--------:|:----------:|:--------:|
-| Heartbeat TCP                      | ✅       | ✅       | ✅         | ✅       |
-| Fila de tarefas                    |          | ✅       | ✅         | ✅       |
-| Ciclo QUERY / STATUS / ACK         |          | ✅       | ✅         | ✅       |
-| Descoberta UDP broadcast           |          |          | ✅         | ✅       |
-| Eleição determinística             |          |          | ✅         | ✅       |
-| Handshake ELECTION_ACK             |          |          | ✅         | ✅       |
-| Negociação M2M (request_help)      |          |          |            | ✅       |
-| Redirecionamento de worker         |          |          |            | ✅       |
-| Liberação automática (histerese)   |          |          |            | ✅       |
-| notify_worker_returned             |          |          |            | ✅       |
-| Despacho imediato pós-ACK          |          |          |            | ✅       |
+| Feature                            | Sprint 1 | Sprint 2 | Sprint 2.1 | Sprint 3 | Sprint 4 |
+|------------------------------------|:--------:|:--------:|:----------:|:--------:|:--------:|
+| Heartbeat TCP                      | ✅       | ✅       | ✅         | ✅       | ✅       |
+| Fila de tarefas                    |          | ✅       | ✅         | ✅       | ✅       |
+| Ciclo QUERY / STATUS / ACK         |          | ✅       | ✅         | ✅       | ✅       |
+| Descoberta UDP broadcast           |          |          | ✅         | ✅       | ✅       |
+| Eleição determinística             |          |          | ✅         | ✅       | ✅       |
+| Handshake ELECTION_ACK             |          |          | ✅         | ✅       | ✅       |
+| Negociação M2M (request_help)      |          |          |            | ✅       | ✅       |
+| Redirecionamento de worker         |          |          |            | ✅       | ✅       |
+| Liberação automática (histerese)   |          |          |            | ✅       | ✅       |
+| notify_worker_returned             |          |          |            | ✅       | ✅       |
+| Despacho imediato pós-ACK          |          |          |            | ✅       | ✅       |
+| Monitor de métricas (TLS TCP)      |          |          |            |          | ✅       |
+| Payload JSON schema sprint4-monitor|          |          |            |          | ✅       |
+| psutil (CPU, memória, disco)       |          |          |            |          | ✅       |
+| Telemetria ao supervisor externo   |          |          |            |          | ✅       |

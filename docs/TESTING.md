@@ -3,13 +3,23 @@
 ## Como Executar
 
 ```powershell
-# Na raiz do projeto
+# Testes Sprint 3
 python -m pytest test_sprint3.py -v
 # ou
 python test_sprint3.py
+
+# Testes Sprint 4
+python -m pytest test_sprint4.py -v
+# ou
+python test_sprint4.py
+
+# Todos de uma vez
+python test_sprint3.py; python test_sprint4.py
 ```
 
-**Resultado:** 60 testes, 0 falhas, tempo ≈ 0.045s (todos unitários, sem I/O de rede).
+**Sprint 3:** 60 testes, 0 falhas, tempo ≈ 0.045s.
+**Sprint 4:** 39 testes, 0 falhas, tempo ≈ 0.07s.
+**Total:** 99 testes unitários, todos sem I/O de rede real.
 
 ---
 
@@ -138,7 +148,7 @@ python test_sprint3.py
 
 ---
 
-## Cobertura por Requisito
+## Cobertura por Requisito — Sprint 3
 
 | Requisito Sprint 3                              | Coberto por                                    |
 |-------------------------------------------------|------------------------------------------------|
@@ -154,3 +164,113 @@ python test_sprint3.py
 | Sem pedidos duplicados                          | TestSaturacaoEAjuda.test_no_duplicate_help_requests |
 | Guard pós-release no dispatch                   | TestDispatchTarefas.test_no_dispatch_if_worker_released |
 | Compilação sem erros                            | TestCompilaçãoSintaxe                          |
+
+---
+
+## Suíte Sprint 4 (`test_sprint4.py`)
+
+| Classe de Teste              | Foco                                              | Testes |
+|------------------------------|---------------------------------------------------|--------|
+| `TestPayloadSchema`          | Campos obrigatórios do payload JSON               | 10     |
+| `TestPayloadValues`          | Valores: ISO-8601, UUID, payload_version, role    | 7      |
+| `TestFarmMetrics`            | workers_idle, oldest_task_age, borrowed_workers   | 7      |
+| `TestSystemMetrics`          | Estrutura, fallback psutil, fallback load_average | 4      |
+| `TestMonitorResilience`      | Loop continua após falha, TLS, sem recv           | 3      |
+| `TestGetFarmState`           | Integração com master.py, s4_counters             | 5      |
+| `TestSyntaxSprint4`          | py_compile para monitor.py, master.py, config.py  | 3      |
+
+### TestPayloadSchema (10 testes)
+
+| Caso | Descrição | Resultado |
+|------|-----------|-----------|
+| `test_top_level_fields_presentes` | `server_uuid`, `hostname`, `role`, `task`, `timestamp`, `message_id`, `payload_version`, `performance` | ✅ PASS |
+| `test_performance_system_fields` | `uptime_seconds`, `load_average_1m/5m`, `cpu`, `memory`, `disk` | ✅ PASS |
+| `test_performance_system_cpu_fields` | `usage_percent`, `count_logical`, `count_physical` | ✅ PASS |
+| `test_performance_system_memory_fields` | `total_mb`, `available_mb`, `percent_used`, `memory_used` | ✅ PASS |
+| `test_performance_system_disk_fields` | `total_gb`, `free_gb`, `percent_used` | ✅ PASS |
+| `test_performance_farm_state_workers_fields` | 10 campos de workers | ✅ PASS |
+| `test_performance_farm_state_tasks_fields` | 5 campos de tasks | ✅ PASS |
+| `test_performance_config_thresholds_fields` | `max_task`, `warn_cpu_percent`, `warn_memory_percent`, `release_task` | ✅ PASS |
+| `test_performance_neighbors_is_list` | `neighbors` é lista | ✅ PASS |
+| `test_performance_neighbors_fields_quando_presente` | `server_uuid`, `status`, `last_heartbeat` | ✅ PASS |
+
+### TestPayloadValues (7 testes)
+
+| Caso | Descrição | Resultado |
+|------|-----------|-----------|
+| `test_timestamp_formato_iso8601` | Regex `YYYY-MM-DDTHH:MM:SSZ` | ✅ PASS |
+| `test_message_id_e_uuid_valido` | `uuid.UUID(mid)` sem exceção | ✅ PASS |
+| `test_message_id_unico_por_chamada` | Dois reports com IDs distintos | ✅ PASS |
+| `test_payload_version` | Valor exato `"sprint4-monitor"` | ✅ PASS |
+| `test_role_e_master` | `role == "master"` | ✅ PASS |
+| `test_task_e_performance_report` | `task == "performance_report"` | ✅ PASS |
+| `test_uptime_seconds_positivo` | `uptime_seconds >= 0` | ✅ PASS |
+
+### TestFarmMetrics (7 testes)
+
+| Caso | Descrição | Resultado |
+|------|-----------|-----------|
+| `test_workers_idle_calculado_corretamente` | total=5, util=3 → idle=2 | ✅ PASS |
+| `test_workers_available_capacity_igual_idle` | `available_capacity == idle` | ✅ PASS |
+| `test_workers_alive_igual_total_registered` | `alive == total_registered` | ✅ PASS |
+| `test_oldest_task_age_zero_quando_fila_vazia` | `oldest_age=0` propagado | ✅ PASS |
+| `test_oldest_task_age_positivo` | `oldest_age=312 > 0` | ✅ PASS |
+| `test_borrowed_workers_direction_out` | `direction="out"` e `peer_uuid` | ✅ PASS |
+| `test_borrowed_workers_direction_in` | `direction="in"` | ✅ PASS |
+
+### TestSystemMetrics (4 testes)
+
+| Caso | Descrição | Resultado |
+|------|-----------|-----------|
+| `test_collect_system_metrics_retorna_estrutura_completa` | uptime, cpu, memory, disk presentes | ✅ PASS |
+| `test_load_average_fallback_sem_getloadavg` | No Windows retorna floats >= 0 | ✅ PASS |
+| `test_collect_sem_psutil_retorna_zeros_cpu_mem` | `_PSUTIL=False` → cpu=0.0, mem=0 | ✅ PASS |
+| `test_disk_metrics_sao_floats_nao_negativos` | total_gb, free_gb, percent >= 0 | ✅ PASS |
+
+### TestMonitorResilience (3 testes)
+
+| Caso | Descrição | Resultado |
+|------|-----------|-----------|
+| `test_send_failure_nao_propaga_no_loop` | OSError em `send_to_supervisor` → loop continua | ✅ PASS |
+| `test_send_to_supervisor_usa_tls` | `ssl.create_default_context` chamado | ✅ PASS |
+| `test_send_to_supervisor_nao_chama_recv` | `mock_tls.recv` nunca chamado | ✅ PASS |
+
+### TestGetFarmState (5 testes)
+
+| Caso | Descrição | Resultado |
+|------|-----------|-----------|
+| `test_get_farm_state_retorna_estrutura_obrigatoria` | start_time, workers, tasks, config_thresholds, neighbors | ✅ PASS |
+| `test_get_farm_state_workers_campos_presentes` | 10 campos de workers | ✅ PASS |
+| `test_s4_counters_tasks_ok_incrementa_via_status` | Incremento thread-safe via lock | ✅ PASS |
+| `test_s4_tasks_running_set_add_discard` | add/discard com lock | ✅ PASS |
+| `test_s4_enqueue_times_registra_e_remove` | enqueue_task → registra; dequeue_task → remove | ✅ PASS |
+
+### TestSyntaxSprint4 (3 testes)
+
+| Caso | Descrição | Resultado |
+|------|-----------|-----------|
+| `test_monitor_syntax` | `py_compile.compile("monitor.py")` | ✅ PASS |
+| `test_master_syntax` | `py_compile.compile("master.py")` | ✅ PASS |
+| `test_config_syntax` | `py_compile.compile("config.py")` | ✅ PASS |
+
+---
+
+## Cobertura por Requisito — Sprint 4
+
+| Requisito Sprint 4                                  | Coberto por                                        |
+|-----------------------------------------------------|----------------------------------------------------|
+| Payload com todos os campos obrigatórios            | TestPayloadSchema (10 testes)                      |
+| `message_id` UUID único por envio                   | TestPayloadValues.test_message_id_*                |
+| `timestamp` em ISO-8601 UTC                         | TestPayloadValues.test_timestamp_formato_iso8601   |
+| `payload_version = "sprint4-monitor"`               | TestPayloadValues.test_payload_version             |
+| Métricas corretas de workers_idle                   | TestFarmMetrics.test_workers_idle_calculado_corretamente |
+| `oldest_task_age_s` calculado desde enfileiramento  | TestFarmMetrics.test_oldest_task_age_*             |
+| Fallback quando psutil não instalado                | TestSystemMetrics.test_collect_sem_psutil_*        |
+| Fallback `os.getloadavg` (Windows)                  | TestSystemMetrics.test_load_average_fallback_*     |
+| Loop não para com falha de envio                    | TestMonitorResilience.test_send_failure_*          |
+| TLS obrigatório (`ssl.create_default_context`)      | TestMonitorResilience.test_send_to_supervisor_usa_tls |
+| Fire-and-forget (sem recv)                          | TestMonitorResilience.test_send_to_supervisor_nao_chama_recv |
+| `get_farm_state()` retorna snapshot completo        | TestGetFarmState (5 testes)                        |
+| `s4_counters` incrementados no fluxo STATUS         | TestGetFarmState.test_s4_counters_tasks_ok_*       |
+| `s4_enqueue_times` rastreia timestamps na fila      | TestGetFarmState.test_s4_enqueue_times_*           |
+| Sintaxe válida em monitor.py, master.py, config.py  | TestSyntaxSprint4 (3 testes)                       |

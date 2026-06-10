@@ -527,7 +527,7 @@ done
 | [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | Todos os formatos de mensagem e fluxos de comunicação |
 | [`docs/SPRINTS.md`](docs/SPRINTS.md) | Descrição detalhada de cada sprint |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Decisões arquiteturais (ADR-001 a ADR-009) |
-| [`docs/TESTING.md`](docs/TESTING.md) | 60 casos de teste e cobertura de requisitos |
+| [`docs/TESTING.md`](docs/TESTING.md) | 99 casos de teste (Sprint 3 + Sprint 4) e cobertura de requisitos |
 | [`docs/EXECUTION.md`](docs/EXECUTION.md) | Instruções passo a passo para cada cenário |
 
 ### Especificações Oficiais
@@ -561,15 +561,12 @@ done
 | 3 | command_release + retorno do Worker | ✅ Completo |
 | 3 | notify_worker_returned | ✅ Completo |
 | 3 | Histerese (LOAD_THRESHOLD / RELEASE_THRESHOLD) | ✅ Completo |
-
----
-
-## 🤝 Próximos Passos (Sprint 4+)
-
-- [ ] Adicionar persistência de tarefas e estado de Workers
-- [ ] Adicionar métricas e dashboard de observabilidade
-- [ ] Explorar eleição de Master em cenários de falha total
-- [ ] Documentar testes de carga e partição de rede
+| 4 | Monitor de métricas (thread daemon) | ✅ Completo |
+| 4 | Coleta via psutil (CPU, memória, disco) | ✅ Completo |
+| 4 | Envio TLS TCP fire-and-forget ao supervisor | ✅ Completo |
+| 4 | Schema `sprint4-monitor` com todos os campos | ✅ Completo |
+| 4 | Fallback sem psutil (zeros) | ✅ Completo |
+| 4 | Resiliência: falha de envio não para o Master | ✅ Completo |
 
 ---
 

@@ -3,12 +3,18 @@
 ## Pré-requisitos
 
 - Python 3.8 ou superior
-- Sem dependências externas — apenas stdlib
 - Windows, Linux ou macOS
 
-Verificar versão:
+Para Sprints 1–3 (sem dependências externas):
 ```powershell
 python --version
+```
+
+Para Sprint 4 (requer `psutil`):
+```powershell
+pip install -r requirements.txt
+# ou
+pip install psutil
 ```
 
 ---
@@ -215,6 +221,75 @@ python worker.py 127.0.0.1 5001
 
 ---
 
+---
+
+## Cenário 5: Sprint 4 — Monitor de Métricas ao Supervisor
+
+O Master envia um relatório de performance via TLS TCP ao supervisor `nuted-ia.dev:443` a cada 10 segundos.
+O envio é automático (thread daemon) e não requer configuração adicional além do `psutil`.
+
+### Passo 1: Instalar psutil
+
+```powershell
+pip install -r requirements.txt
+```
+
+### Passo 2: Iniciar o Master com monitor ativo
+
+```powershell
+python master.py
+```
+
+Saída esperada ao iniciar:
+```
+[MASTER] Iniciando | UUID: <uuid> | nome: MASTER_1
+...
+[MONITOR] Iniciando | supervisor=nuted-ia.dev:443 | farm_id=MASTER_1 | intervalo=10.0s
+```
+
+A cada 10 segundos:
+```
+[MONITOR] Relatorio enviado | server_uuid=MASTER_1 | msg_id=a3f8c1d2
+```
+
+Se o supervisor estiver inacessível (esperado em ambiente local):
+```
+[MONITOR] Falha ao enviar relatorio: [Errno 11001] getaddrinfo failed
+```
+O Master continua operando normalmente — a falha do monitor é silenciosa.
+
+### Passo 3: Configurar supervisor personalizado (opcional)
+
+```powershell
+$env:SUPERVISOR_HOST="meu-supervisor.local"
+$env:SUPERVISOR_PORT="8443"
+$env:SUPERVISOR_INTERVAL="30.0"    # enviar a cada 30s
+$env:FARM_ID="MASTER_PRODUCAO"     # identificador da farm no payload
+python master.py
+```
+
+### O que o payload contém
+
+```json
+{
+  "server_uuid": "MASTER_1",
+  "hostname": "minha-maquina",
+  "role": "master",
+  "task": "performance_report",
+  "timestamp": "2026-06-10T12:00:00Z",
+  "message_id": "<uuid4-unico>",
+  "payload_version": "sprint4-monitor",
+  "performance": {
+    "system": { "uptime_seconds": 3600, "cpu": {...}, "memory": {...}, "disk": {...} },
+    "farm_state": { "workers": {...}, "tasks": {...} },
+    "config_thresholds": { "max_task": 5, "release_task": 3 },
+    "neighbors": []
+  }
+}
+```
+
+---
+
 ## Variáveis de Ambiente — Referência Rápida
 
 ```powershell
@@ -231,6 +306,13 @@ $env:NEIGHBOR_MASTERS="127.0.0.1:5001,192.168.1.10:5000"
 $env:RELEASE_THRESHOLD="3"           # carga para liberar workers emprestados
 $env:SPRINT3_HELP_TIMEOUT="5.0"      # timeout da negociação M2M (segundos)
 $env:SPRINT3_DEFAULT_WORKERS_TO_BORROW="1"   # workers solicitados por padrão
+
+# Sprint 4 — Monitor de métricas
+$env:SUPERVISOR_HOST="nuted-ia.dev"  # host do supervisor TLS
+$env:SUPERVISOR_PORT="443"           # porta TLS
+$env:SUPERVISOR_INTERVAL="10.0"      # intervalo de envio (segundos)
+$env:FARM_ID="MASTER_1"             # identificador da farm no payload
+$env:FARM_HOSTNAME="minha-maquina"   # hostname reportado (padrão: socket.gethostname())
 ```
 
 ---

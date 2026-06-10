@@ -303,6 +303,106 @@ sequenceDiagram
 
 ---
 
+---
+
+## Sprint 4 — Relatório de Performance ao Supervisor
+
+O Master envia um payload JSON via **TLS TCP** (porta 443) ao supervisor `nuted-ia.dev` a cada 10 segundos.
+O envio é **fire-and-forget**: conecta, envia, fecha — sem aguardar resposta.
+
+```mermaid
+sequenceDiagram
+    participant M as Master (monitor_loop)
+    participant S as Supervisor (nuted-ia.dev:443)
+
+    Note over M: a cada SUPERVISOR_INTERVAL (10s)
+    M->>+S: TLS connect
+    M->>S: JSON + "\n" (performance_report)
+    M->>S: close()
+    Note over S: sem resposta enviada
+```
+
+### Schema: `performance_report`
+
+```json
+{
+  "server_uuid": "MASTER_1",
+  "hostname": "minha-maquina",
+  "role": "master",
+  "task": "performance_report",
+  "timestamp": "2026-06-10T12:00:00Z",
+  "message_id": "<uuid4>",
+  "payload_version": "sprint4-monitor",
+  "performance": {
+    "system": {
+      "uptime_seconds": 3600,
+      "load_average_1m": 0.45,
+      "load_average_5m": 0.32,
+      "cpu": {
+        "usage_percent": 12.5,
+        "count_logical": 8,
+        "count_physical": 4
+      },
+      "memory": {
+        "total_mb": 16384,
+        "available_mb": 8192,
+        "percent_used": 50.0,
+        "memory_used": 8192
+      },
+      "disk": {
+        "total_gb": 500.0,
+        "free_gb": 250.0,
+        "percent_used": 50.0
+      }
+    },
+    "farm_state": {
+      "workers": {
+        "total_registered": 3,
+        "workers_utilization": 2,
+        "workers_alive": 3,
+        "workers_idle": 1,
+        "workers_borrowed": 0,
+        "workers_received": 0,
+        "workers_failed": 0,
+        "workers_home": 3,
+        "workers_available_capacity": 1,
+        "borrowed_workers": []
+      },
+      "tasks": {
+        "tasks_pending": 4,
+        "tasks_running": 2,
+        "tasks_completed": 10,
+        "tasks_failed": 1,
+        "oldest_task_age_s": 5
+      }
+    },
+    "config_thresholds": {
+      "max_task": 5,
+      "warn_cpu_percent": 85,
+      "warn_memory_percent": 85,
+      "release_task": 3
+    },
+    "neighbors": [
+      {
+        "server_uuid": "MASTER_2",
+        "status": "available",
+        "last_heartbeat": "2026-06-10T11:59:55Z"
+      }
+    ]
+  }
+}
+```
+
+**Campos obrigatórios de nível raiz:** `server_uuid`, `hostname`, `role`, `task`, `timestamp`, `message_id`, `payload_version`, `performance`.
+
+**`message_id`:** UUID4 único por envio — não repete entre chamadas.
+
+**`timestamp`:** ISO-8601 UTC, formato `YYYY-MM-DDTHH:MM:SSZ`.
+
+**`payload_version`:** valor fixo `"sprint4-monitor"`.
+
+---
+
 ## Sumário de Todos os Tipos de Mensagem
 
 | Tipo                       | Protocolo | Direção          | Sprint |
@@ -325,3 +425,4 @@ sequenceDiagram
 | `register_temporary_worker`| TCP       | Worker → Master  | 3      |
 | `command_release`          | TCP       | Master → Worker  | 3      |
 | `notify_worker_returned`   | TCP       | Master → Master  | 3      |
+| `performance_report`       | TLS TCP   | Master → Supervisor | 4   |
