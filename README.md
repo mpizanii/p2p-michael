@@ -276,26 +276,37 @@ python worker.py 127.0.0.1 5000
 
 ### Opção 3: Múltiplos Masters (Sprint 3)
 
-Para testar negociação entre Masters com empréstimo de Workers:
+Para demonstrar a negociação Master-to-Master com empréstimo de Workers:
 
-**Terminal 1 — Master A:**
+> **Pré-requisito:** `NEIGHBOR_MASTERS` deve apontar para o Master que irá emprestar Workers.
+> O Master que possui `NEIGHBOR_MASTERS` configurado é quem faz o pedido de ajuda quando satura.
+
+**Terminal 1 — Master B (helper — apenas aceita workers, não pede ajuda):**
 ```bash
-MASTER_NAME=MASTER_A MASTER_PORT=5000 python master.py
+MASTER_NAME=MASTER_B MASTER_PORT=5001 python master.py
 ```
 
-**Terminal 2 — Master B (vizinho de A):**
+**Terminal 2 — Master A (saturado — pede ajuda ao B):**
 ```bash
-MASTER_NAME=MASTER_B MASTER_PORT=5001 NEIGHBOR_MASTERS=127.0.0.1:5000 python master.py
+MASTER_NAME=MASTER_A MASTER_PORT=5000 NEIGHBOR_MASTERS=127.0.0.1:5001 python master.py
 ```
 
-**Terminal 3+ — Workers:**
+**Terminal 3–4 — Workers ociosos no Master B (serão emprestados):**
 ```bash
-python worker.py 127.0.0.1 5000
-python worker.py 127.0.0.1 5000
+python worker.py 127.0.0.1 5001
 python worker.py 127.0.0.1 5001
 ```
 
-Monitore a fila do Master A. Quando `pending > LOAD_THRESHOLD`, ele enviará `request_help` e poderá redirecionar Workers do Master B.
+**Terminal 5–6 — Workers no Master A (insuficientes para a carga):**
+```bash
+python worker.py 127.0.0.1 5000
+```
+
+**O que observar:**
+1. Master A satura (`pending > 5`) → envia `request_help` ao Master B
+2. Master B responde `response_accepted` e manda `command_redirect` aos seus Workers
+3. Workers enviam `register_temporary_worker` ao Master A e processam tarefas
+4. Quando `pending <= 3`, Master A envia `command_release` → Workers voltam ao Master B
 
 ---
 
@@ -508,9 +519,23 @@ done
 
 ## 📚 Referências e Documentação
 
-- **Plano Geral do Projeto:** Ver arquivo PDF na pasta `docs/`
-- **Design Specification Sprint 3:** `docs/superpowers/specs/2026-05-08-p2p-discovery-election-design.md`
-- **Plan Sprint 3:** `docs/superpowers/plans/2026-05-08-p2p-discovery-election.md`
+### Documentação Técnica (pasta `docs/`)
+
+| Documento | Conteúdo |
+|-----------|----------|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Arquitetura, diagramas Mermaid, modelo de threads |
+| [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | Todos os formatos de mensagem e fluxos de comunicação |
+| [`docs/SPRINTS.md`](docs/SPRINTS.md) | Descrição detalhada de cada sprint |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | Decisões arquiteturais (ADR-001 a ADR-009) |
+| [`docs/TESTING.md`](docs/TESTING.md) | 60 casos de teste e cobertura de requisitos |
+| [`docs/EXECUTION.md`](docs/EXECUTION.md) | Instruções passo a passo para cada cenário |
+
+### Especificações Oficiais
+
+- **Plano Geral do Projeto:** `plano_proj_SD-26_1.pdf`
+- **Especificação Sprint 2.1 (Descoberta/Eleição):** `discovery.pdf`
+- **Design Spec Sprint 2.1:** `docs/superpowers/specs/2026-05-08-p2p-discovery-election-design.md`
+- **Plan Sprint 2.1:** `docs/superpowers/plans/2026-05-08-p2p-discovery-election.md`
 
 ---
 
@@ -518,24 +543,30 @@ done
 
 | Sprint | Feature | Status |
 |--------|---------|--------|
-| 1 | Heartbeat básico | ✅ 90% Completo |
-| 1 | Descoberta UDP | ✅ Funcionando |
-| 1 | Eleição determinística | ✅ Funcionando |
-| 2 | Ciclo de tarefas (apresentação) | ✅ 90% Completo |
+| 1 | Heartbeat básico | ✅ Completo |
+| 2.1 | Descoberta UDP (broadcast/unicast) | ✅ Completo |
+| 2.1 | Eleição determinística (menor nome) | ✅ Completo |
+| 2.1 | Handshake TCP pós-eleição | ✅ Completo |
+| 2.1 | Fallback/retry sem Master | ✅ Completo |
+| 2 | Ciclo de tarefas (apresentação) | ✅ Completo |
 | 2 | Fila e distribuição | ✅ Completo |
-| 2 | Reporte de status | ✅ Completo |
+| 2 | Reporte de status (OK/NOK) | ✅ Completo |
 | 2 | ACK de confirmação | ✅ Completo |
-| 3 | Request/Response Master-to-Master | ✅ Completo |
-| 3 | Command_redirect/command_release | ✅ Completo |
-| 3 | Histerese (limiar de liberação) | ✅ Completo |
-| 3 | request_id correlação | ✅ Completo |
+| 3 | Detecção de saturação | ✅ Completo |
+| 3 | request_help + response_accepted/rejected | ✅ Completo |
+| 3 | request_id correlacionado | ✅ Completo |
+| 3 | command_redirect → register_temporary_worker | ✅ Completo |
+| 3 | ORIGINAL_MASTER_NAME no registro temporário | ✅ Completo |
+| 3 | Dispatch contínuo de tarefas após ACK | ✅ Completo |
+| 3 | command_release + retorno do Worker | ✅ Completo |
+| 3 | notify_worker_returned | ✅ Completo |
+| 3 | Histerese (LOAD_THRESHOLD / RELEASE_THRESHOLD) | ✅ Completo |
 
 ---
 
-## 🤝 Próximos Passos
+## 🤝 Próximos Passos (Sprint 4+)
 
 - [ ] Adicionar persistência de tarefas e estado de Workers
-- [ ] Criar testes automatizados para a negociação entre Masters
 - [ ] Adicionar métricas e dashboard de observabilidade
 - [ ] Explorar eleição de Master em cenários de falha total
 - [ ] Documentar testes de carga e partição de rede
