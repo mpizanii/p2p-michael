@@ -16,7 +16,7 @@ DISCOVERY_BROADCAST_ADDRESS = os.getenv("DISCOVERY_BROADCAST_ADDRESS", "255.255.
 DISCOVERY_TIMEOUT = float(os.getenv("DISCOVERY_TIMEOUT", "3.0"))
 DISCOVERY_RETRY_DELAY = float(os.getenv("DISCOVERY_RETRY_DELAY", "2.0"))
 
-LOAD_THRESHOLD = 5
+LOAD_THRESHOLD = int(os.getenv("LOAD_THRESHOLD", "5"))
 RELEASE_THRESHOLD = int(os.getenv("RELEASE_THRESHOLD", "3"))
 TASK_DURATION = 3
 REQUEST_INTERVAL = 1.0
@@ -54,9 +54,10 @@ ELECTION_CANDIDATES = [MASTER_HOST]
 NEIGHBOR_MASTERS = _parse_neighbor_masters(os.getenv("NEIGHBOR_MASTERS", ""))
 
 # Sprint 4 — Supervisor de métricas
-SUPERVISOR_HOST = os.getenv("SUPERVISOR_HOST", "nuted-ia.dev")
-SUPERVISOR_PORT = int(os.getenv("SUPERVISOR_PORT", "443"))
-SUPERVISOR_SNI = os.getenv("SUPERVISOR_SNI", "nuted-ia.dev")
+SUPERVISOR_HOST = os.getenv("SUPERVISOR_HOST", "10.62.206.206")
+SUPERVISOR_PORT = int(os.getenv("SUPERVISOR_PORT", "8000"))
+SUPERVISOR_SNI = os.getenv("SUPERVISOR_SNI", "10.62.206.206")
+SUPERVISOR_TLS = os.getenv("SUPERVISOR_TLS", "false").lower() == "true"
 SUPERVISOR_INTERVAL = float(os.getenv("SUPERVISOR_INTERVAL", "10.0"))
 FARM_ID = os.getenv("FARM_ID", MASTER_NAME)
-FARM_HOSTNAME = os.getenv("FARM_HOSTNAME", _socket.gethostname())
+FARM_HOSTNAME = os.getenv("FARM_HOSTNAME", f"{FARM_ID}.farm.local")

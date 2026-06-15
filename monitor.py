@@ -16,11 +16,13 @@ from config import (
     SUPERVISOR_PORT,
     SUPERVISOR_SNI,
     SUPERVISOR_INTERVAL,
+    SUPERVISOR_TLS,
 )
 
 try:
     import psutil as _psutil
     _PSUTIL = True
+    _psutil.cpu_percent(interval=None)  # prime: first call always returns 0.0
 except ImportError:
     _PSUTIL = False
 
@@ -114,19 +116,23 @@ def build_performance_report(farm_state):
 
 
 def send_to_supervisor(payload):
-    """Conecta via TLS TCP, envia JSON + newline, fecha sem aguardar resposta."""
-    ctx = ssl.create_default_context()
+    """Conecta via TCP (TLS opcional), envia JSON + newline, fecha sem aguardar resposta."""
+    data = (json.dumps(payload) + "\n").encode("utf-8")
     raw = socket.create_connection((SUPERVISOR_HOST, SUPERVISOR_PORT), timeout=10.0)
     try:
-        tls = ctx.wrap_socket(raw, server_hostname=SUPERVISOR_SNI)
+        if SUPERVISOR_TLS:
+            ctx = ssl.create_default_context()
+            conn = ctx.wrap_socket(raw, server_hostname=SUPERVISOR_SNI)
+        else:
+            conn = raw
         try:
-            tls.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+            conn.sendall(data)
             print(
                 f"[MONITOR] Relatorio enviado | server_uuid={payload['server_uuid']}"
                 f" | msg_id={payload['message_id'][:8]}"
             )
         finally:
-            tls.close()
+            conn.close()
     except Exception:
         try:
             raw.close()
