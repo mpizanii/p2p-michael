@@ -31,6 +31,9 @@ set SUPERVISOR_INTERVAL=10.0
 :: Exemplo: set NEIGHBOR_MASTERS=10.62.206.50:5000
 set NEIGHBOR_MASTERS=
 
+:: false = modo passivo (sem gerador de tarefas), true = gera carga
+set GENERATE_TASKS=false
+
 :: Threshold de saturacao e liberacao
 set LOAD_THRESHOLD=5
 set RELEASE_THRESHOLD=3

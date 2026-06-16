@@ -5,7 +5,7 @@ import uuid
 SERVER_UUID = str(uuid.uuid4())
 
 # MASTER_HOST is the address workers will try after discovery/handshake.
-MASTER_HOST = os.getenv("MASTER_HOST", "127.0.0.1")
+MASTER_HOST = os.getenv("MASTER_HOST", "10.62.206.49")
 MASTER_BIND_HOST = os.getenv("MASTER_BIND_HOST", "0.0.0.0")
 MASTER_PORT = int(os.getenv("MASTER_PORT", "5000"))
 MASTER_NAME = os.getenv("MASTER_NAME", "MASTER_1")
@@ -52,6 +52,9 @@ def _parse_neighbor_masters(raw_value):
 ELECTION_PORT = 5100
 ELECTION_CANDIDATES = [MASTER_HOST]
 NEIGHBOR_MASTERS = _parse_neighbor_masters(os.getenv("NEIGHBOR_MASTERS", ""))
+
+# Set GENERATE_TASKS=false to run as a passive helper master (no task load generator).
+GENERATE_TASKS = os.getenv("GENERATE_TASKS", "true").lower() == "true"
 
 # Sprint 4 — Supervisor de métricas
 SUPERVISOR_HOST = os.getenv("SUPERVISOR_HOST", "10.62.206.206")

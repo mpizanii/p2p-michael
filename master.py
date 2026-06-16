@@ -29,6 +29,7 @@ from config import (
     SPRINT3_HELP_TIMEOUT,
     SPRINT3_DEFAULT_WORKERS_TO_BORROW,
     SPRINT1_HEARTBEAT_ONLY,
+    GENERATE_TASKS,
 )
 import monitor as _monitor
 
@@ -407,9 +408,8 @@ def borrowed_worker(msg):
 
 
 def enqueue_task(task_id, user, force_nok=False):
-    # Fila da Sprint 2: cada item guarda a tarefa e metadados de simulacao.
     with task_queue_lock:
-        task_queue.append({"TASK_ID": task_id, "USER": user, "FORCE_NOK": force_nok})
+        task_queue.append({"USER": user, "TASK_ID": task_id, "FORCE_NOK": force_nok})
     with s4_enqueue_lock:
         s4_enqueue_times[task_id] = time.time()
 
@@ -641,7 +641,12 @@ def accept_loop():
 
         task = msg.get("TASK", "")
         message_type = protocol_message_type(msg)
-        worker_uuid = msg.get("WORKER_UUID") or msg.get("SERVER_UUID") or str(uuid.uuid4())
+        worker_uuid = (
+            msg.get("WORKER_UUID")
+            or msg.get("SERVER_UUID")
+            or protocol_payload(msg).get("WORKER_UUID")
+            or str(uuid.uuid4())
+        )
 
         # Heartbeat, apresentacao ou primeiro ACK da eleicao do Worker.
         if task == "HEARTBEAT" or msg.get("WORKER") == "ALIVE" or message_type == "ELECTION_ACK":
@@ -869,7 +874,7 @@ def get_farm_state():
         "workers": {
             "total_registered": total_registered,
             "workers_utilization": workers_utilization,
-            "workers_alive": total_registered,
+            "workers_alive": total_registered + workers_borrowed,
             "workers_idle": workers_idle,
             "workers_borrowed": workers_borrowed,
             "workers_received": workers_received,
@@ -903,6 +908,9 @@ if __name__ == "__main__":
     threading.Thread(target=_monitor.monitor_loop, args=(get_farm_state,), daemon=True).start()
     if SPRINT1_HEARTBEAT_ONLY:
         print("[MASTER] Modo Sprint 1 ativo: apenas HEARTBEAT para demonstracao.")
+        accept_loop()
+    elif not GENERATE_TASKS:
+        print("[MASTER] Modo passivo: sem gerador de carga. Aguardando workers e pedidos de ajuda.")
         accept_loop()
     else:
         threading.Thread(target=accept_loop, daemon=True).start()
